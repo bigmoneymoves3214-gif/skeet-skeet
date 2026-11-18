@@ -1,159 +1,214 @@
 --[[
-    uilib v2 - a clean monochrome Roblox UI library
+    uilib - a port of the ATARAX ImGui framework to Roblox
     ===============================================================================
 
-    A ground-up redesign. v1 was a port of an ImGui cheat menu: 12px bitmap-ish
-    text, 8px square checkboxes, sharp notched borders, translucent "glass"
-    panels, 4px gutters. Accurate to its source and not nice to look at.
+    Not "inspired by". Every colour, size, padding, radius and animation speed in
+    here was read out of the C++ source rather than eyeballed from a screenshot:
 
-    This shares no visual DNA with it. The design language here is the one modern
-    product UI has settled on - Linear, Vercel, Arc - adapted to a strictly
-    black / white / grey palette:
+        settings/colors.h      the palette
+        settings/elements.h    every widget's metrics
+        settings/variables.h   rounding, anim speed, window and child sizes
+        gui.cpp                window composition and tab order
+        elements/helpers.cpp   draw_decorations, set_style
+        elements/child.cpp     the card
+        elements/checkbox.cpp  elements/slider.cpp  elements/combo.cpp
+        elements/buttons.cpp   tab_button
+        elements/watermark.cpp elements/notify.cpp  elements/hue_slider.cpp
+        elements/window.cpp    scrollbar colours
 
-      * FLAT, NOT GLASS. One near-black base, cards one step lighter, controls
-        one step lighter again. Depth comes from those three steps and a single
-        1px low-contrast border, never from transparency.
-      * ROUNDED. 14px on the window, 10px on cards, 8px on controls, full radius
-        on switches and knobs. This is the single biggest change from v1.
-      * AIR. 20px window padding, 14px between cards, 8px between rows, 30px
-        toggle rows. v1 packed rows 14px apart; nothing here is tighter than 24.
-      * TYPE CARRIES THE HIERARCHY. One family at three weights and three sizes.
-        No bold-and-shadowed titles, no coloured labels - a heading is smaller
-        and dimmer than its content, which is what makes a dense panel scan.
-      * WHITE IS THE ACCENT. In a monochrome palette the only "colour" available
-        is contrast, so pure white is reserved for the active state and nothing
-        else: a live toggle, a slider's fill, the selected row, a held keybind.
-        Everything idle is grey. That constraint is what makes it read as
-        designed rather than merely dark.
-      * EVERYTHING MOVES. Every state change is a 0.12-0.18s ease-out: the
-        switch knob, the tab indicator, hover fills, popups. Nothing snaps.
+    Things that surprised me reading it, and that a from-a-screenshot guess
+    would have got wrong:
 
-    API COMPATIBILITY
-    -----------------
-    The public API is unchanged from v1, deliberately. Private.lua has ~120 call
-    sites against it and should not need touching for a reskin. Two notes:
+      * ROUNDING IS 2. Not 8, not 12. Everything is very slightly softened and
+        otherwise square. This single number is most of why the original reads
+        as a cheat menu and my earlier attempt read as a web dashboard.
+      * THE WINDOW IS TWO RECTS. A 650x80 titlebar and a separate content panel
+        below it with a 10px GAP between them - they are not one surface.
+      * SEPARATORS BELONG TO ROWS. Every checkbox, slider and combo draws a
+        dark34 line across its own bottom edge. They are not group dividers;
+        that is why the original looks evenly ruled.
+      * DIM TEXT IS NOT DISABLED. An unchecked row is text_inactive (106,106,126)
+        and a checked one is pure white, animated between. Nothing in the
+        screenshot is greyed out - half of it is just switched off.
+      * THE SLIDER GRAB IS A 5x10 WHITE PILL, not a circle, and the track is
+        5px tall with a dark42 border over a dark33 fill.
+      * CARD WIDTH IS FIXED at 302, and shrinks to 292 when the scrollbar
+        appears. Two columns plus a 15px gap is exactly the 620px of content
+        area that 650 minus 2x15 padding leaves.
 
-      * AddGroupbox(name, grid) still accepts an ImGui-style {X,Y,W,H} rect, but
-        the grid is gone - X picks the column and the rest is ignored. Cards size
-        to their content now, which is strictly better than being stretched to
-        fill a hand-computed row of a 10x11 grid.
-      * The `weight` argument to AddLeftGroupbox / AddRightGroupbox is accepted
-        and ignored, for the same reason.
+    WHAT CANNOT BE 1:1
+    ------------------
+    The original uses Tektur, a font that does not exist in Roblox and cannot be
+    added without uploading it as an asset. Montserrat is the closest of the
+    built-in families. Set Library.FontFamily before CreateWindow to change it;
+    if you upload Tektur yourself, point that at your asset and the port is
+    exact.
 
-    Layout is a UIListLayout in a scrolling column per side, so cards grow to fit
-    their rows and a column scrolls when it runs out of room. v1 computed every
-    row's y by hand off a cursor; none of that arithmetic survives.
+    Blur: draw_background_blur() behind the titlebar and watermark needs the
+    DX11 swapchain. Nothing in Roblox can blur what is behind a ScreenGui, so
+    those surfaces use the same dark14 fill at the same 0.85 alpha without it.
+
+    The public API is unchanged from the previous version, so Private.lua's ~120
+    call sites keep working.
 ]]
 
 local UserInputService = game:GetService("UserInputService")
 local RunService       = game:GetService("RunService")
 local TweenService     = game:GetService("TweenService")
-local TextService      = game:GetService("TextService")
 local HttpService      = game:GetService("HttpService")
 local Players          = game:GetService("Players")
 
 local LocalPlayer = Players.LocalPlayer
 
 ---------------------------------------------------------------------------------
--- TYPE
---
--- The single biggest reason v1 looked cheap was Enum.Font.Code at 13px. Real
--- weights are only reachable through FontFace, and weight contrast at one size
--- is what replaces v1's bold-and-shadowed titles.
---
--- Family choice, having checked what actually ships:
---
---   Montserrat   default. A geometric sans, confirmed present in
---                rbxasset://fonts/families, and the family Roblox now maps the
---                removed Enum.Font.Gotham* values onto. Clean and unencumbered.
---   BuilderSans  Roblox's own interface face, also confirmed present and nicer
---                at small sizes - but it ships under the Builder Font License,
---                which restricts use outside Roblox experiences. Set
---                Library.Type.Prefer = "BuilderSans" before CreateWindow if you
---                want it.
---
--- Deliberately NOT used: Inter and GothamSSm. Neither is a real
--- rbxasset://fonts/families entry, despite both being widely copy-pasted; a
--- missing family silently renders as a fallback, so hardcoding one would have
--- looked fine on my side and wrong on yours.
---
--- The legacy Enum.Font path is the floor for clients without FontFace. Gotham
--- is tried first but is officially removed, so SourceSans - which has existed
--- since the beginning - is what actually guarantees the menu is never textless.
+-- PALETTE  (settings/colors.h, verbatim)
 ---------------------------------------------------------------------------------
-local Type = {
-    Prefer = "Montserrat",
-    Family = nil,      -- resolved family asset path, nil when on legacy enums
-    Faces  = {},       -- [weightName] = Font | Enum.Font
-    Legacy = false,
+local Theme = {
+    Accent = Color3.fromRGB(100, 150, 255),
+    White  = Color3.fromRGB(255, 255, 255),
+    Black  = Color3.fromRGB(0, 0, 0),
+
+    Dark14 = Color3.fromRGB(14, 14, 17),
+    Dark18 = Color3.fromRGB(18, 18, 23),
+    Dark22 = Color3.fromRGB(22, 22, 29),
+    Dark26 = Color3.fromRGB(26, 28, 36),
+    Dark27 = Color3.fromRGB(27, 27, 36),
+    Dark33 = Color3.fromRGB(33, 33, 43),
+    Dark34 = Color3.fromRGB(34, 34, 45),
+    Dark37 = Color3.fromRGB(37, 37, 49),
+    Dark42 = Color3.fromRGB(42, 42, 58),
+    Dark55 = Color3.fromRGB(55, 55, 75),
+
+    TextActive   = Color3.fromRGB(255, 255, 255),
+    TextHovered  = Color3.fromRGB(142, 142, 166),
+    TextInactive = Color3.fromRGB(106, 106, 126),
 }
 
-do
-    local FAMILIES = {
-        Montserrat  = "rbxasset://fonts/families/Montserrat.json",
-        BuilderSans = "rbxasset://fonts/families/BuilderSans.json",
-    }
+---------------------------------------------------------------------------------
+-- METRICS  (settings/elements.h + settings/variables.h, verbatim)
+---------------------------------------------------------------------------------
+local M = {
+    Rounding  = 2,
+    AnimSpeed = 14,
 
-    local WEIGHTS = {
+    WindowW   = 650,
+    WindowH   = 600,
+    ScrollW   = 6,
+
+    TitlebarH = 80,
+    TitlebarSpacing = 10,
+    TripleW   = 25,
+
+    -- gui.cpp: dummy(25,0), dummy_line(50), then tabs with 20 spacing
+    TabsStartGap = 25,
+    TabsLineGap  = 50,
+    TabSpacing   = 20,
+    TabSplitGap  = 10,     -- the dummy_line after tab index 3
+    TabSplitAfter = 4,     -- 0-based index 3, so after the 4th tab
+    TabFontSize  = 18,
+
+    ContentPad     = 15,
+    ContentSpacing = 15,
+
+    CardW        = 302,
+    CardWScroll  = 292,
+    CardPadX     = 10,
+
+    RowFontSize  = 14,
+
+    CheckboxH    = 35,
+    CheckboxHueH = 50,
+    CheckboxBox  = 15,
+    CheckboxPadX = 10,
+    CheckboxPadY = 10,
+    CheckmarkSize = 7,
+
+    SliderH      = 20,
+    SliderTotalH = 48,
+    SliderTrackH = 5,
+    GrabW        = 5,
+    GrabH        = 10,
+
+    ComboH       = 42,
+    ComboBoxW    = 90,
+    ComboBoxH    = 22,
+    ComboPad     = 5,
+    ComboFrameX  = 8,
+    ComboFrameY  = 6,
+    SelectableH  = 20,
+
+    HueH         = 5,
+
+    ColorBtnR    = 6,
+    HotkeyW      = 12,
+    HotkeyH      = 12,
+
+    ButtonW      = 136,
+    ButtonH      = 23,
+
+    FramePadY    = 10,     -- set_style: FramePadding = (0, 10)
+
+    -- colorpicker
+    CpWindow     = Vector2.new(164, 191),
+    CpWindowNoA  = Vector2.new(164, 178),
+    CpSV         = Vector2.new(130, 118),
+    CpPad        = 8,
+    CpBarH       = 5,
+    CpGrabW      = 6,
+    CpGrabH      = 8,
+    CpCircleR    = 4,
+}
+
+---------------------------------------------------------------------------------
+-- TYPE
+--
+-- The original is Tektur at 12 / 13 / 14 / 16 / 18. Tektur is not a Roblox font
+-- family and cannot be added without uploading it, so Montserrat stands in -
+-- the closest built-in geometric sans. Override Library.FontFamily with an
+-- uploaded Tektur asset to make the port exact.
+---------------------------------------------------------------------------------
+local Type = { Family = nil, Faces = {}, Legacy = false }
+
+function Type.build(family)
+    local weights = {
         Regular  = Enum.FontWeight.Regular,
         Medium   = Enum.FontWeight.Medium,
         SemiBold = Enum.FontWeight.SemiBold,
         Bold     = Enum.FontWeight.Bold,
     }
-
-    -- Each tier is tried whole: a family missing a weight would otherwise
-    -- collapse two tiers into one and flatten the hierarchy.
-    --
-    -- Construction is the only test, deliberately. Font.new does accept a path
-    -- that does not exist, so the obvious guard is to probe a label's
-    -- TextBounds - but an unparented TextLabel never renders and reports 0, and
-    -- a parented one still reports 0 on the frame it was made, so that probe
-    -- fails for a perfectly good family and silently drops the whole library to
-    -- the legacy path. Both families below were checked against the engine's
-    -- font-family list instead, which is the right place to establish this.
-    local function build(family)
-        local built = {}
-        for name, weight in pairs(WEIGHTS) do
-            local ok, face = pcall(function() return Font.new(family, weight) end)
-            if not ok or not face then return nil end
-            built[name] = face
-        end
-        return built
+    local built = {}
+    for name, weight in pairs(weights) do
+        local ok, face = pcall(function() return Font.new(family, weight) end)
+        if not ok or not face then return nil end
+        built[name] = face
     end
-
-    local order = { Type.Prefer, "Montserrat", "BuilderSans" }
-    for _, name in ipairs(order) do
-        local path = FAMILIES[name]
-        if path then
-            local built = build(path)
-            if built then
-                Type.Family, Type.Faces = path, built
-                break
-            end
-        end
-    end
-
-    if not Type.Family then
-        Type.Legacy = true
-        local function face(...)
-            for _, name in ipairs({ ... }) do
-                local ok, value = pcall(function() return Enum.Font[name] end)
-                if ok and value then return value end
-            end
-            return Enum.Font.SourceSans
-        end
-        Type.Faces = {
-            Regular  = face("Gotham", "SourceSans"),
-            Medium   = face("GothamMedium", "SourceSans"),
-            SemiBold = face("GothamBold", "SourceSansSemibold", "SourceSansBold"),
-            Bold     = face("GothamBlack", "SourceSansBold"),
-        }
-    end
+    return built
 end
 
--- One call sets whichever property this client supports. Only FontFace is set
--- on a modern client: the two properties are kept in sync by the engine, and
--- writing both would fight.
+function Type.init(family)
+    local built = family and Type.build(family)
+    if built then
+        Type.Family, Type.Faces, Type.Legacy = family, built, false
+        return
+    end
+    -- Floor for clients without FontFace. Gotham is officially removed, so
+    -- SourceSans - which has existed since the beginning - is the guarantee.
+    Type.Legacy = true
+    local function pick(...)
+        for _, name in ipairs({ ... }) do
+            local ok, value = pcall(function() return Enum.Font[name] end)
+            if ok and value then return value end
+        end
+        return Enum.Font.SourceSans
+    end
+    Type.Faces = {
+        Regular  = pick("Gotham", "SourceSans"),
+        Medium   = pick("GothamMedium", "SourceSans"),
+        SemiBold = pick("GothamBold", "SourceSansSemibold", "SourceSansBold"),
+        Bold     = pick("GothamBlack", "SourceSansBold"),
+    }
+end
+
 function Type.apply(label, weight)
     local face = Type.Faces[weight or "Medium"] or Type.Faces.Medium
     if Type.Legacy then
@@ -163,141 +218,221 @@ function Type.apply(label, weight)
     end
 end
 
--- There is no synchronous way to measure a FontFace: GetTextSize takes a legacy
--- Enum.Font only and GetTextBoundsAsync yields. So anything that needs to size
--- itself to its text builds the labels first and reads TextBounds on the next
--- frame, which is exact. `measure` exists for that deferred pass.
-function Type.measure(labels)
-    local widest = 0
-    for _, label in ipairs(labels) do
-        if label and label.Parent then
-            widest = math.max(widest, label.TextBounds.X)
+---------------------------------------------------------------------------------
+-- UTIL
+---------------------------------------------------------------------------------
+local Util = {}
+
+function Util.New(class, props, children)
+    local inst = Instance.new(class)
+    local parent
+    if props then
+        for key, value in pairs(props) do
+            if key == "Parent" then
+                parent = value
+            elseif key == "Weight" then
+                Type.apply(inst, value)
+            else
+                inst[key] = value
+            end
         end
     end
-    return widest
+    if children then
+        for _, child in ipairs(children) do child.Parent = inst end
+    end
+    if parent then inst.Parent = parent end
+    return inst
 end
 
--- TextBounds is only populated once the label has actually rendered, and
--- task.defer can resume before that happens - so a single deferred read can
--- legitimately come back 0. Retry for a few frames, then give up and let the
--- caller keep its fallback size.
-function Type.measureAsync(labels, callback, attempts)
-    task.spawn(function()
-        for _ = 1, attempts or 6 do
-            local widest = Type.measure(labels)
-            if widest > 0 then
-                callback(widest)
-                return
+-- rounding is 2 everywhere, so this takes it as the default rather than making
+-- every call site repeat it.
+function Util.Corner(parent, radius)
+    return Util.New("UICorner", {
+        CornerRadius = UDim.new(0, radius or M.Rounding), Parent = parent,
+    })
+end
+
+function Util.Stroke(parent, color, thickness)
+    return Util.New("UIStroke", {
+        Color = color or Theme.Dark34,
+        Thickness = thickness or 1,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+        Parent = parent,
+    })
+end
+
+function Util.Pad(parent, top, bottom, left, right)
+    return Util.New("UIPadding", {
+        PaddingTop    = UDim.new(0, top or 0),
+        PaddingBottom = UDim.new(0, bottom or 0),
+        PaddingLeft   = UDim.new(0, left or 0),
+        PaddingRight  = UDim.new(0, right or 0),
+        Parent = parent,
+    })
+end
+
+function Util.List(parent, gap, direction, align)
+    return Util.New("UIListLayout", {
+        FillDirection = direction or Enum.FillDirection.Vertical,
+        HorizontalAlignment = align or Enum.HorizontalAlignment.Left,
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Padding = UDim.new(0, gap or 0),
+        Parent = parent,
+    })
+end
+
+function Util.Clamp(v, lo, hi)
+    if v < lo then return lo end
+    if v > hi then return hi end
+    return v
+end
+
+function Util.Round(value, places)
+    local mult = 10 ^ (places or 0)
+    return math.floor(value * mult + 0.5) / mult
+end
+
+function Util.PointInside(inst, point)
+    if not inst or not inst.Parent or not inst.Visible then return false end
+    local pos, size = inst.AbsolutePosition, inst.AbsoluteSize
+    return point.X >= pos.X and point.X <= pos.X + size.X
+       and point.Y >= pos.Y and point.Y <= pos.Y + size.Y
+end
+
+function Util.EscapeRich(text)
+    local out = string.gsub(tostring(text), "&", "&amp;")
+    out = string.gsub(out, "<", "&lt;")
+    out = string.gsub(out, ">", "&gt;")
+    return out
+end
+
+local KEY_LABELS = {
+    LeftShift = "SHIFT", RightShift = "SHIFT",
+    LeftAlt = "ALT", RightAlt = "ALT",
+    LeftControl = "CTRL", RightControl = "CTRL",
+    Space = "SPACE", Delete = "DEL", Tab = "TAB", CapsLock = "CAPS",
+    Backspace = "BACK", Return = "ENTER", Escape = "ESC",
+    MB1 = "MOUSE1", MB2 = "MOUSE2", MB3 = "MOUSE3",
+    Zero = "0", One = "1", Two = "2", Three = "3", Four = "4",
+    Five = "5", Six = "6", Seven = "7", Eight = "8", Nine = "9",
+}
+
+function Util.KeyLabel(key)
+    if not key or key == "" then return "NONE" end
+    return KEY_LABELS[key] or string.upper(key)
+end
+
+local MOUSE_TO_KEY = {
+    [Enum.UserInputType.MouseButton1] = "MB1",
+    [Enum.UserInputType.MouseButton2] = "MB2",
+    [Enum.UserInputType.MouseButton3] = "MB3",
+}
+
+function Util.KeyFromInput(input)
+    if input.UserInputType == Enum.UserInputType.Keyboard then
+        return input.KeyCode.Name
+    end
+    return MOUSE_TO_KEY[input.UserInputType]
+end
+
+function Util.IsKeyDown(key)
+    if not key or key == "" then return false end
+    if key == "MB1" then return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) end
+    if key == "MB2" then return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) end
+    if key == "MB3" then return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton3) end
+    local code = Enum.KeyCode[key]
+    return code and UserInputService:IsKeyDown(code) or false
+end
+
+---------------------------------------------------------------------------------
+-- ANIMATION
+--
+-- functions.h: easing(value, target, speed) steps by speed/framerate each frame,
+-- i.e. framerate-independent exponential smoothing toward the target, at
+-- anim_speed = 14. Not a tween with a duration - there is no "arrival", it just
+-- converges, which is why hovering on and off the original feels continuous
+-- rather than like two competing tweens.
+--
+-- Every animated property in the menu is registered here and driven by the one
+-- shared RenderStepped pass, so a colour fade costs a lerp and a property write
+-- rather than a TweenService object per state change.
+---------------------------------------------------------------------------------
+local Anim = { List = {} }
+
+function Anim.track(inst, prop, initial, speed)
+    local entry = {
+        Inst = inst, Prop = prop,
+        Value = initial, Target = initial,
+        Speed = speed or M.AnimSpeed,
+        IsColor = typeof(initial) == "Color3",
+    }
+    Anim.List[#Anim.List + 1] = entry
+    inst[prop] = initial
+    return entry
+end
+
+function Anim.set(entry, target)
+    if entry then entry.Target = target end
+end
+
+function Anim.step(dt)
+    for index = #Anim.List, 1, -1 do
+        local entry = Anim.List[index]
+        local inst = entry.Inst
+        if not inst or not inst.Parent then
+            table.remove(Anim.List, index)
+        else
+            local alpha = Util.Clamp(dt * entry.Speed, 0, 1)
+            if entry.IsColor then
+                if entry.Value ~= entry.Target then
+                    entry.Value = entry.Value:Lerp(entry.Target, alpha)
+                    inst[entry.Prop] = entry.Value
+                end
+            else
+                local diff = entry.Target - entry.Value
+                if math.abs(diff) > 0.0005 then
+                    entry.Value = entry.Value + diff * alpha
+                    inst[entry.Prop] = entry.Value
+                elseif entry.Value ~= entry.Target then
+                    entry.Value = entry.Target
+                    inst[entry.Prop] = entry.Value
+                end
             end
-            RunService.RenderStepped:Wait()
         end
-    end)
+    end
 end
 
----------------------------------------------------------------------------------
--- THEME
---
--- Three greys of elevation, two of border, four of text, and white. That is the
--- entire palette; there is no second hue anywhere in the library.
----------------------------------------------------------------------------------
-local Theme = {
-    Bg      = Color3.fromRGB(10, 10, 11),    -- window base
-    Card    = Color3.fromRGB(16, 16, 19),    -- groupbox
-    Control = Color3.fromRGB(23, 23, 27),    -- field / track at rest
-    Hover   = Color3.fromRGB(30, 30, 35),    -- field hover, selected row
-    Line    = Color3.fromRGB(38, 38, 44),    -- 1px border
-    LineHi  = Color3.fromRGB(52, 52, 60),    -- focused / emphasised border
+-- Values that drive geometry rather than an Instance property (a bar's fill
+-- fraction, a dropdown's height) use this plain form.
+local Scalar = { List = {} }
 
-    Text    = Color3.fromRGB(244, 244, 246), -- primary
-    Text2   = Color3.fromRGB(154, 154, 162), -- secondary, idle labels
-    Text3   = Color3.fromRGB(102, 102, 110), -- tertiary, placeholders, headings
-    Text4   = Color3.fromRGB(68, 68, 75),    -- disabled
+function Scalar.track(initial, apply, speed)
+    local entry = {
+        Value = initial, Target = initial,
+        Apply = apply, Speed = speed or M.AnimSpeed, Alive = true,
+    }
+    Scalar.List[#Scalar.List + 1] = entry
+    return entry
+end
 
-    Accent  = Color3.fromRGB(255, 255, 255), -- the only "colour"
-    OnAccent= Color3.fromRGB(10, 10, 11),    -- text/knob sitting on accent
-
-    -- Kept because notifications read better with a hint of semantics, and both
-    -- are near-white so the palette holds.
-    Good    = Color3.fromRGB(236, 236, 238),
-    Bad     = Color3.fromRGB(255, 120, 120),
-}
-
----------------------------------------------------------------------------------
--- METRICS
----------------------------------------------------------------------------------
-local M = {
-    WindowW   = 760,
-    WindowH   = 540,
-    Radius    = 14,
-
-    SidebarW  = 184,
-    Pad       = 20,
-    ColGap    = 14,
-
-    CardRadius= 10,
-    CardPad   = 14,
-    CardGap   = 14,
-    RowGap    = 8,
-
-    TabH      = 36,
-    TabRadius = 8,
-    TabGap    = 2,
-
-    RowH      = 30,     -- toggle / keypicker / colorpicker row
-    SwitchW   = 36,
-    SwitchH   = 20,
-    KnobD     = 16,
-
-    SliderH   = 46,     -- label row + track
-    TrackH    = 4,
-    SliderKnob= 11,
-
-    FieldH    = 34,
-    FieldR    = 8,
-    ButtonH   = 34,
-    ListRowH  = 32,
-
-    ChipH     = 18,
-    ChipR     = 5,
-    SwatchW   = 28,
-    SwatchH   = 16,
-    SwatchR   = 5,
-
-    TextSize  = 13,
-    TitleSize = 12,
-    SmallSize = 11,
-}
-
----------------------------------------------------------------------------------
--- MOTION
---
--- One duration scale and one curve for the whole library. Mixing easings is what
--- makes an interface feel assembled from parts.
----------------------------------------------------------------------------------
-local Motion = {
-    Fast = 0.12,
-    Base = 0.16,
-    Slow = 0.24,
-}
-
-function Motion.to(inst, props, duration, style)
-    local info = TweenInfo.new(
-        duration or Motion.Base,
-        style or Enum.EasingStyle.Quad,
-        Enum.EasingDirection.Out
-    )
-    local tween = TweenService:Create(inst, info, props)
-    tween:Play()
-    return tween
+function Scalar.step(dt)
+    for index = #Scalar.List, 1, -1 do
+        local entry = Scalar.List[index]
+        if not entry.Alive then
+            table.remove(Scalar.List, index)
+        else
+            local diff = entry.Target - entry.Value
+            if math.abs(diff) > 0.0005 then
+                entry.Value = entry.Value + diff * Util.Clamp(dt * entry.Speed, 0, 1)
+                local ok = pcall(entry.Apply, entry.Value)
+                if not ok then entry.Alive = false end
+            end
+        end
+    end
 end
 
 ---------------------------------------------------------------------------------
 -- FILESYSTEM SHIM
---
--- Executor file functions are not guaranteed to exist and do not exist in
--- Studio. Everything routes through here so a missing primitive degrades to
--- "configs unavailable" instead of erroring mid-build; memory-backed otherwise,
--- so the save/load UI stays exercisable while developing.
 ---------------------------------------------------------------------------------
 local fs = {
     HasReal = (typeof(writefile) == "function" and typeof(readfile) == "function"),
@@ -313,7 +448,6 @@ function fs.IsFolder(path)
 end
 
 function fs.MakeFolder(path)
-    -- makefolder does not create intermediate levels, so walk the path.
     local built = nil
     for part in string.gmatch(path, "[^/\\]+") do
         built = built and (built .. "/" .. part) or part
@@ -371,181 +505,35 @@ function fs.List(path)
 end
 
 ---------------------------------------------------------------------------------
--- UTIL
----------------------------------------------------------------------------------
-local Util = {}
-
--- Parent is assigned last: setting it first makes every subsequent property
--- write a change to a rendered instance, which is measurably slower across a
--- tree this size.
-function Util.New(class, props, children)
-    local inst = Instance.new(class)
-    local parent
-    if props then
-        for key, value in pairs(props) do
-            if key == "Parent" then
-                parent = value
-            elseif key == "Weight" then
-                Type.apply(inst, value)
-            else
-                inst[key] = value
-            end
-        end
-    end
-    if children then
-        for _, child in ipairs(children) do child.Parent = inst end
-    end
-    if parent then inst.Parent = parent end
-    return inst
-end
-
-function Util.Corner(parent, radius)
-    return Util.New("UICorner", {
-        CornerRadius = UDim.new(0, radius or M.FieldR), Parent = parent,
-    })
-end
-
-function Util.Stroke(parent, color, thickness)
-    return Util.New("UIStroke", {
-        Color = color or Theme.Line,
-        Thickness = thickness or 1,
-        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
-        Parent = parent,
-    })
-end
-
-function Util.Pad(parent, all, top, bottom, left, right)
-    return Util.New("UIPadding", {
-        PaddingTop    = UDim.new(0, top or all or 0),
-        PaddingBottom = UDim.new(0, bottom or all or 0),
-        PaddingLeft   = UDim.new(0, left or all or 0),
-        PaddingRight  = UDim.new(0, right or all or 0),
-        Parent = parent,
-    })
-end
-
-function Util.List(parent, gap, direction)
-    return Util.New("UIListLayout", {
-        FillDirection = direction or Enum.FillDirection.Vertical,
-        SortOrder = Enum.SortOrder.LayoutOrder,
-        Padding = UDim.new(0, gap or 0),
-        Parent = parent,
-    })
-end
-
-function Util.Clamp(v, lo, hi)
-    if v < lo then return lo end
-    if v > hi then return hi end
-    return v
-end
-
-function Util.Round(value, places)
-    local mult = 10 ^ (places or 0)
-    return math.floor(value * mult + 0.5) / mult
-end
-
-function Util.Lerp(a, b, t) return a + (b - a) * t end
-
-function Util.PointInside(inst, point)
-    if not inst or not inst.Parent or not inst.Visible then return false end
-    local pos, size = inst.AbsolutePosition, inst.AbsoluteSize
-    return point.X >= pos.X and point.X <= pos.X + size.X
-       and point.Y >= pos.Y and point.Y <= pos.Y + size.Y
-end
-
--- RichText is used for the keybind rows, so a name containing &, < or > would be
--- parsed as markup. Roblox renders the whole label as raw tags once markup is
--- malformed, so one bracket breaks the panel.
-function Util.EscapeRich(text)
-    local out = string.gsub(tostring(text), "&", "&amp;")
-    out = string.gsub(out, "<", "&lt;")
-    out = string.gsub(out, ">", "&gt;")
-    return out
-end
-
-local KEY_LABELS = {
-    LeftShift = "Shift", RightShift = "Shift",
-    LeftAlt = "Alt", RightAlt = "Alt",
-    LeftControl = "Ctrl", RightControl = "Ctrl",
-    Space = "Space", Delete = "Del", Tab = "Tab", CapsLock = "Caps",
-    Backspace = "Bksp", Return = "Enter", Escape = "Esc",
-    MB1 = "M1", MB2 = "M2", MB3 = "M3",
-    Zero = "0", One = "1", Two = "2", Three = "3", Four = "4",
-    Five = "5", Six = "6", Seven = "7", Eight = "8", Nine = "9",
-}
-
--- Mixed case rather than v1's three-letter caps ("SHF", "CTR"): with real type
--- at 11px there is no reason to abbreviate past recognition.
-function Util.KeyLabel(key)
-    if not key or key == "" then return "—" end
-    local mapped = KEY_LABELS[key]
-    if mapped then return mapped end
-    if #key == 1 then return key end
-    if string.match(key, "^F%d+$") then return key end
-    return key
-end
-
-local MOUSE_TO_KEY = {
-    [Enum.UserInputType.MouseButton1] = "MB1",
-    [Enum.UserInputType.MouseButton2] = "MB2",
-    [Enum.UserInputType.MouseButton3] = "MB3",
-}
-
-function Util.KeyFromInput(input)
-    if input.UserInputType == Enum.UserInputType.Keyboard then
-        return input.KeyCode.Name
-    end
-    return MOUSE_TO_KEY[input.UserInputType]
-end
-
-function Util.IsKeyDown(key)
-    if not key or key == "" then return false end
-    if key == "MB1" then return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) end
-    if key == "MB2" then return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) end
-    if key == "MB3" then return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton3) end
-    local code = Enum.KeyCode[key]
-    return code and UserInputService:IsKeyDown(code) or false
-end
-
----------------------------------------------------------------------------------
 -- LIBRARY
 ---------------------------------------------------------------------------------
 local Library = {
-    Theme   = Theme,
-    Metrics = M,
-    Util    = Util,
-    Type    = Type,
-    Motion  = Motion,
-    FS      = fs,
+    Theme = Theme, Metrics = M, Util = Util, Type = Type, FS = fs, Anim = Anim,
 
-    Toggles = {},
-    Options = {},
+    FontFamily = "rbxasset://fonts/families/Montserrat.json",
 
-    Unloaded     = false,
-    Open         = false,
-    MenuKey      = Enum.KeyCode.Insert,
+    Toggles = {}, Options = {},
+
+    Unloaded = false,
+    Open = false,
+    MenuKey = Enum.KeyCode.Insert,
     ShowKeybinds = false,
 
-    -- v1 exposed Glass.* and MenuAlpha because its surfaces were translucent.
-    -- This design is flat, so the only global visual knob is overall opacity.
-    Opacity = 1,
+    -- var->gui.dpi is 1.35 in the original. 1 here so the menu is 650x600 as
+    -- authored; raise it for a bigger menu on a high-DPI display.
+    Scale = 1,
 
-    _connections = {},
-    _renderBinds = {},
-    _popups      = {},
-    _keybinds    = {},
-    _watchers    = {},
-    _accent      = {},
-    _surfaces    = {},
+    _connections = {}, _renderBinds = {}, _popups = {},
+    _keybinds = {}, _watchers = {}, _accent = {},
 }
 Library.__index = Library
 
----------------------------------------------------------------------------------
--- LIFETIME
---
--- Nothing is created or connected outside these helpers, which is what makes
--- Unload total rather than best-effort.
----------------------------------------------------------------------------------
+-- SCALE() in the original. Every metric goes through it.
+local function S(value)
+    return math.floor(value * Library.Scale + 0.5)
+end
+Library.S = S
+
 function Library:Connect(signal, fn)
     local conn = signal:Connect(fn)
     self._connections[#self._connections + 1] = conn
@@ -566,13 +554,7 @@ function Library:Unload()
     if self.Unloaded then return end
     self.Unloaded = true
 
-    -- Consumer teardown runs FIRST, while the UI and its connections are still
-    -- alive: a handler wants to restore game state and may read widget values on
-    -- the way out, and running it after the teardown below would hand it a
-    -- half-destroyed menu.
-    for _, callback in ipairs(self._unloadCallbacks or {}) do
-        pcall(callback)
-    end
+    for _, callback in ipairs(self._unloadCallbacks or {}) do pcall(callback) end
 
     for _, name in ipairs(self._renderBinds) do
         pcall(function() RunService:UnbindFromRenderStep(name) end)
@@ -589,17 +571,13 @@ function Library:Unload()
         self.ScreenGui = nil
     end
 
+    Anim.List, Scalar.List = {}, {}
     self.Toggles, self.Options = {}, {}
-    self._popups, self._keybinds, self._watchers = {}, {}, {}
-    self._accent, self._surfaces = {}, {}
+    self._popups, self._keybinds, self._watchers, self._accent = {}, {}, {}, {}
 end
 
----------------------------------------------------------------------------------
--- THEMING REGISTRY
---
--- Accent is white by default, but it is one value and some people will want to
--- tint it, so anything that paints with it registers rather than hardcoding.
----------------------------------------------------------------------------------
+-- Accent is a live colour in the original (there is a colour picker for it on
+-- the MISC tab), so anything painted with it registers rather than baking it.
 function Library:Accent(inst, prop)
     prop = prop or "BackgroundColor3"
     self._accent[#self._accent + 1] = { Inst = inst, Prop = prop }
@@ -622,120 +600,55 @@ function Library:SetAccent(color)
     end
 end
 
--- Opacity fades a whole panel, text and borders included, through CanvasGroup's
--- GroupTransparency. Doing it per-surface does not work: fading only the window
--- frame leaves every card, field and label fully opaque on top of a translucent
--- background, which reads as a rendering bug rather than a dimmed menu.
---
--- CanvasGroup rasterises its subtree, so it is not free and it is not on every
--- client. Where it is missing the panels are plain Frames and the opacity
--- control is simply not offered, rather than offered and broken.
-Library.CanFade = (function()
-    local ok, inst = pcall(Instance.new, "CanvasGroup")
-    if ok and inst then
-        inst:Destroy()
-        return true
-    end
-    return false
-end)()
-
--- Every top-level panel goes through this so one call fades all of them.
-function Library:Panel(props, children)
-    local panel = Util.New(self.CanFade and "CanvasGroup" or "Frame", props, children)
-    self._surfaces[#self._surfaces + 1] = panel
-    return panel
-end
-
-function Library:Refresh()
-    if not self.CanFade then return end
-    local transparency = Util.Clamp(1 - self.Opacity, 0, 1)
-    for _, panel in ipairs(self._surfaces) do
-        if panel and panel.Parent then
-            pcall(function() panel.GroupTransparency = transparency end)
-        end
-    end
-end
+function Library:Refresh() end
 
 ---------------------------------------------------------------------------------
--- TEXT HELPER
+-- TEXT
 ---------------------------------------------------------------------------------
 function Library:Label(parent, text, opts)
     opts = opts or {}
-    local label = Util.New("TextLabel", {
+    return Util.New("TextLabel", {
         BackgroundTransparency = 1,
-        Text           = text or "",
-        TextSize       = opts.Size or M.TextSize,
-        TextColor3     = opts.Color or Theme.Text2,
+        Text = text or "",
+        TextSize = S(opts.Size or M.RowFontSize),
+        TextColor3 = opts.Color or Theme.TextInactive,
         TextXAlignment = opts.XAlign or Enum.TextXAlignment.Left,
         TextYAlignment = opts.YAlign or Enum.TextYAlignment.Center,
-        TextTruncate   = opts.Truncate ~= false
+        TextTruncate = opts.Truncate ~= false
             and Enum.TextTruncate.AtEnd or Enum.TextTruncate.None,
-        TextWrapped    = opts.Wrapped or false,
-        RichText       = opts.Rich or false,
-        Position       = opts.Position or UDim2.new(),
-        Size           = opts.Size2 or UDim2.fromScale(1, 1),
-        AnchorPoint    = opts.AnchorPoint or Vector2.new(),
-        AutomaticSize  = opts.AutoSize or Enum.AutomaticSize.None,
-        ZIndex         = opts.ZIndex or 2,
-        Weight         = opts.Weight or "Medium",
-        Parent         = parent,
+        RichText = opts.Rich or false,
+        Position = opts.Position or UDim2.new(),
+        Size = opts.Size2 or UDim2.fromScale(1, 1),
+        AnchorPoint = opts.AnchorPoint or Vector2.new(),
+        AutomaticSize = opts.AutoSize or Enum.AutomaticSize.None,
+        ZIndex = opts.ZIndex or 2,
+        Weight = opts.Weight or "Medium",
+        Parent = parent,
     })
-    return label
 end
 
 ---------------------------------------------------------------------------------
 -- HOVER WATCHERS
---
--- MouseEnter/MouseLeave is unreliable once a popup overlays a control and does
--- not fire for a frame that is covered, so hover is a per-frame rect test -
--- one shared RenderStepped pass for every hover state in the menu.
 ---------------------------------------------------------------------------------
 function Library:Watch(fn)
     self._watchers[#self._watchers + 1] = fn
     return fn
 end
 
--- A watcher is dropped if it errors or if it returns false, which is how a
--- watcher attached to something transient retires itself.
-function Library:_StartWatchers()
+function Library:_StartLoop()
     self:Connect(RunService.RenderStepped, function(dt)
         if self.Unloaded then return end
+
+        Anim.step(dt)
+        Scalar.step(dt)
+
         local mouse = UserInputService:GetMouseLocation()
-        -- GetMouseLocation includes the topbar inset; the ScreenGui ignores it,
-        -- so without this every hover rect sits 36px low.
         local point = Vector2.new(mouse.X, mouse.Y - self._guiInset)
         for index = #self._watchers, 1, -1 do
             local ok, keep = pcall(self._watchers[index], point, dt)
-            if not ok or keep == false then
-                table.remove(self._watchers, index)
-            end
+            if not ok or keep == false then table.remove(self._watchers, index) end
         end
     end)
-end
-
--- Standard hover/press behaviour for anything that looks like a button: returns
--- the button so callers can chain, and repaints through the supplied function.
-function Library:Interactive(button, paint)
-    local state = { Hover = false, Held = false }
-
-    self:Watch(function(point)
-        local over = Util.PointInside(button, point)
-        if over ~= state.Hover then
-            state.Hover = over
-            if not over then state.Held = false end
-            paint(state)
-        end
-    end)
-
-    self:Connect(button.MouseButton1Down, function()
-        state.Held = true; paint(state)
-    end)
-    self:Connect(button.MouseButton1Up, function()
-        state.Held = false; paint(state)
-    end)
-
-    paint(state)
-    return state
 end
 
 ---------------------------------------------------------------------------------
@@ -775,11 +688,13 @@ end
 function Library:_CreateRoot()
     if self.ScreenGui then return end
 
+    Type.init(self.FontFamily)
+
     self.ScreenGui = Util.New("ScreenGui", {
-        Name           = HttpService:GenerateGUID(false),
-        DisplayOrder   = 999,
+        Name = HttpService:GenerateGUID(false),
+        DisplayOrder = 999,
         IgnoreGuiInset = true,
-        ResetOnSpawn   = false,
+        ResetOnSpawn = false,
         ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
     })
 
@@ -792,9 +707,6 @@ function Library:_CreateRoot()
         self._guiInset = game:GetService("GuiService"):GetGuiInset().Y
     end)
 
-    -- Roblox hides and locks the cursor in most games. A modal TextButton
-    -- releases it while the menu is up without fighting whatever the game does
-    -- to UserInputService.
     self.Modal = Util.New("TextButton", {
         Name = "Modal", Text = "", Modal = false, AutoButtonColor = false,
         BackgroundTransparency = 1, Size = UDim2.fromOffset(1, 1), ZIndex = 0,
@@ -806,22 +718,7 @@ function Library:_CreateRoot()
         Size = UDim2.fromScale(1, 1), ZIndex = 5000, Parent = self.ScreenGui,
     })
 
-    self.NotifyLayer = Util.New("Frame", {
-        Name = "Notifications", BackgroundTransparency = 1,
-        AnchorPoint = Vector2.new(1, 1),
-        Position = UDim2.new(1, -18, 1, -18),
-        Size = UDim2.new(0, 280, 1, -36),
-        ZIndex = 6000, Parent = self.ScreenGui,
-    }, {
-        Util.New("UIListLayout", {
-            HorizontalAlignment = Enum.HorizontalAlignment.Right,
-            VerticalAlignment = Enum.VerticalAlignment.Bottom,
-            SortOrder = Enum.SortOrder.LayoutOrder,
-            Padding = UDim.new(0, 8),
-        }),
-    })
-
-    self:_StartWatchers()
+    self:_StartLoop()
 
     self:Connect(UserInputService.InputBegan, function(input, processed)
         if self.Unloaded then return end
@@ -836,9 +733,6 @@ function Library:_CreateRoot()
             end
         end
 
-        -- Capture ignores `processed`: binding a mouse button means clicking it
-        -- over the menu, which Roblox reports as consumed by the GUI, so gating
-        -- on processed would make M2 and M3 impossible to bind.
         if self._capturing then
             self:_HandleCapture(input)
             return
@@ -858,9 +752,6 @@ function Library:_CreateRoot()
     end)
 end
 
----------------------------------------------------------------------------------
--- INPUT
----------------------------------------------------------------------------------
 function Library:_HandleCapture(input)
     local picker = self._capturing
     if not picker then return end
@@ -874,7 +765,6 @@ function Library:_HandleCapture(input)
         self:_StopCapture()
         return
     end
-    -- The click that opened the binder arrives here too and would bind itself.
     if input.UserInputType == Enum.UserInputType.MouseButton1 then return end
 
     local key = Util.KeyFromInput(input)
@@ -908,17 +798,16 @@ function Library:_StopCapture()
     end
 end
 
----------------------------------------------------------------------------------
--- DRAGGING
----------------------------------------------------------------------------------
-function Library:Draggable(handle, target)
+function Library:Draggable(handle, targets)
     local dragging, origin, startPos = false, nil, nil
 
     self:Connect(handle.InputBegan, function(input)
         if input.UserInputType ~= Enum.UserInputType.MouseButton1
         and input.UserInputType ~= Enum.UserInputType.Touch then return end
         if self:AnyPopupOpen() then return end
-        dragging, origin, startPos = true, input.Position, target.Position
+        dragging, origin = true, input.Position
+        startPos = {}
+        for index, target in ipairs(targets) do startPos[index] = target.Position end
     end)
 
     self:Connect(UserInputService.InputEnded, function(input)
@@ -931,290 +820,27 @@ function Library:Draggable(handle, target)
         if input.UserInputType ~= Enum.UserInputType.MouseMovement
         and input.UserInputType ~= Enum.UserInputType.Touch then return end
         local delta = input.Position - origin
-        target.Position = UDim2.new(
-            startPos.X.Scale, startPos.X.Offset + delta.X,
-            startPos.Y.Scale, startPos.Y.Offset + delta.Y
-        )
-    end)
-end
-
----------------------------------------------------------------------------------
--- NOTIFICATIONS
---
--- Bottom-right, stacked upward, sliding in from the right edge. A 2px white
--- rule down the left is the only ornament - in a mono palette that single
--- high-contrast edge is what separates a card from the background without a
--- shadow.
----------------------------------------------------------------------------------
-function Library:Notify(text, duration, title)
-    if self.Unloaded or not self.NotifyLayer then return end
-    duration = duration or 3
-
-    local card = Util.New("Frame", {
-        BackgroundColor3 = Theme.Card,
-        BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, title and 54 or 38),
-        Position = UDim2.fromOffset(24, 0),
-        BorderSizePixel = 0,
-        Parent = self.NotifyLayer,
-    })
-    Util.Corner(card, M.CardRadius)
-    local stroke = Util.Stroke(card, Theme.Line)
-    stroke.Transparency = 1
-
-    local rule = self:Accent(Util.New("Frame", {
-        BorderSizePixel = 0, Size = UDim2.new(0, 2, 1, -16),
-        Position = UDim2.new(0, 0, 0, 8),
-        BackgroundTransparency = 1, ZIndex = 3, Parent = card,
-    }), "BackgroundColor3")
-    Util.Corner(rule, 1)
-
-    local labels = {}
-    if title then
-        labels[1] = self:Label(card, title, {
-            Weight = "SemiBold", Color = Theme.Text, Size = M.TitleSize,
-            Position = UDim2.fromOffset(16, 10), Size2 = UDim2.new(1, -28, 0, 16),
-            YAlign = Enum.TextYAlignment.Top,
-        })
-        labels[2] = self:Label(card, text, {
-            Color = Theme.Text2, Size = M.SmallSize,
-            Position = UDim2.fromOffset(16, 28), Size2 = UDim2.new(1, -28, 0, 16),
-            YAlign = Enum.TextYAlignment.Top,
-        })
-    else
-        labels[1] = self:Label(card, text, {
-            Color = Theme.Text, Size = M.TextSize,
-            Position = UDim2.fromOffset(16, 0), Size2 = UDim2.new(1, -28, 1, 0),
-        })
-    end
-    for _, label in ipairs(labels) do label.TextTransparency = 1 end
-
-    Motion.to(card, { BackgroundTransparency = 0, Position = UDim2.new() }, Motion.Slow, Enum.EasingStyle.Quint)
-    Motion.to(stroke, { Transparency = 0 }, Motion.Slow)
-    Motion.to(rule, { BackgroundTransparency = 0 }, Motion.Slow)
-    for _, label in ipairs(labels) do
-        Motion.to(label, { TextTransparency = 0 }, Motion.Slow)
-    end
-
-    task.delay(duration, function()
-        if not card or not card.Parent then return end
-        Motion.to(card, { BackgroundTransparency = 1, Position = UDim2.fromOffset(24, 0) }, Motion.Base)
-        Motion.to(stroke, { Transparency = 1 }, Motion.Base)
-        Motion.to(rule, { BackgroundTransparency = 1 }, Motion.Base)
-        for _, label in ipairs(labels) do
-            Motion.to(label, { TextTransparency = 1 }, Motion.Base)
-        end
-        task.delay(Motion.Base + 0.05, function()
-            pcall(function() card:Destroy() end)
-        end)
-    end)
-end
-
----------------------------------------------------------------------------------
--- WATERMARK
----------------------------------------------------------------------------------
-function Library:SetWatermarkVisible(visible)
-    if self.Watermark then self.Watermark.Visible = visible and true or false end
-end
-
-function Library:SetWatermark(text)
-    self:_CreateRoot()
-
-    if not self.Watermark then
-        self.Watermark = self:Panel({
-            Name = "Watermark", BackgroundColor3 = Theme.Card, BorderSizePixel = 0,
-            Position = UDim2.fromOffset(18, 18),
-            Size = UDim2.fromOffset(160, 30),
-            ZIndex = 4000, Visible = false, Parent = self.ScreenGui,
-        })
-        Util.Corner(self.Watermark, M.FieldR)
-        Util.Stroke(self.Watermark, Theme.Line)
-
-        self:Accent(Util.New("Frame", {
-            BorderSizePixel = 0, Size = UDim2.fromOffset(4, 4),
-            Position = UDim2.fromOffset(12, 13), ZIndex = 3,
-            Parent = self.Watermark,
-        }), "BackgroundColor3").Name = "Dot"
-        Util.Corner(self.Watermark.Dot, 2)
-
-        self.WatermarkLabel = self:Label(self.Watermark, "", {
-            Color = Theme.Text2, Size = M.TitleSize,
-            Position = UDim2.fromOffset(24, 0), Size2 = UDim2.new(1, -36, 1, 0),
-        })
-    end
-
-    self.WatermarkLabel.Text = tostring(text)
-    self.Watermark.Visible = true
-
-    -- Exact rather than estimated from character count, which is why the
-    -- watermark is laid out a frame or two late instead of immediately.
-    Type.measureAsync({ self.WatermarkLabel }, function(width)
-        if self.Watermark and self.Watermark.Parent then
-            self.Watermark.Size = UDim2.fromOffset(math.max(140, width + 40), 30)
+        for index, target in ipairs(targets) do
+            local base = startPos[index]
+            target.Position = UDim2.new(
+                base.X.Scale, base.X.Offset + delta.X,
+                base.Y.Scale, base.Y.Offset + delta.Y
+            )
         end
     end)
 end
 
 ---------------------------------------------------------------------------------
--- KEYBIND LIST
+-- WINDOW  (helpers.cpp draw_decorations + gui.cpp composition)
 --
--- Reads the live KeyPicker registry rather than a copy, so it cannot drift from
--- what the binds actually do. State is a dot rather than the word ON/OFF: at a
--- glance you are reading presence, not text, and it keeps the row to two
--- elements instead of four.
+-- The window is TWO rects, not one:
 --
--- Polled at 0.15s, not per frame, and the rows are rebuilt only when the
--- rendered result changes - without that, holding an aim key destroys and
--- recreates every label several times a second.
----------------------------------------------------------------------------------
-function Library:_CreateKeybindList()
-    self:_CreateRoot()
-    if self.KeybindFrame then return end
-
-    local frame = self:Panel({
-        Name = "Keybinds", BackgroundColor3 = Theme.Card, BorderSizePixel = 0,
-        Position = UDim2.new(0, 18, 0.5, -60),
-        Size = UDim2.fromOffset(170, 40),
-        AutomaticSize = Enum.AutomaticSize.Y,
-        ZIndex = 4000, Visible = false, Active = true, Parent = self.ScreenGui,
-    })
-    Util.Corner(frame, M.CardRadius)
-    Util.Stroke(frame, Theme.Line)
-    Util.Pad(frame, nil, 12, 12, 12, 12)
-    Util.List(frame, 6)
-    self.KeybindFrame = frame
-
-    self:Label(frame, "Keybinds", {
-        Weight = "SemiBold", Color = Theme.Text3, Size = M.SmallSize,
-        Size2 = UDim2.new(1, 0, 0, 14),
-    }).LayoutOrder = 0
-
-    self.KeybindRows = Util.New("Frame", {
-        BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0),
-        AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 1, Parent = frame,
-    })
-    Util.List(self.KeybindRows, 4)
-
-    self:Draggable(frame, frame)
-
-    local nextPoll = 0
-
-    self:Watch(function()
-        if not self.ShowKeybinds then
-            if frame.Visible then frame.Visible = false end
-            return
-        end
-
-        local now = os.clock()
-        if now < nextPoll then return end
-        nextPoll = now + 0.15
-
-        local rows, parts = {}, {}
-        for _, picker in ipairs(self._keybinds) do
-            if picker.Value and picker.Value ~= "" and picker.ShowInList then
-                local active = picker:GetState()
-                -- "Enable Silent Aim" reads as "Silent Aim": the prefix earns
-                -- its place on a menu toggle, not in a list where every row is
-                -- already a feature.
-                local name = string.gsub(picker.Text, "^Enable ", "")
-                rows[#rows + 1] = { Name = name, Key = Util.KeyLabel(picker.Value), On = active }
-                parts[#parts + 1] = name .. "|" .. picker.Value .. "|" .. tostring(active)
-            end
-        end
-
-        local signature = table.concat(parts, ";")
-        frame.Visible = true
-        if signature == self._keybindSignature then return end
-        self._keybindSignature = signature
-
-        for _, child in ipairs(self.KeybindRows:GetChildren()) do
-            if child:IsA("Frame") then child:Destroy() end
-        end
-
-        if #rows == 0 then
-            local row = Util.New("Frame", {
-                BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 16),
-                LayoutOrder = 1, Parent = self.KeybindRows,
-            })
-            self:Label(row, "No keybinds set", {
-                Color = Theme.Text4, Size = M.SmallSize,
-            })
-            frame.Size = UDim2.fromOffset(170, 40)
-            return
-        end
-
-        local nameLabels = {}
-        for index, row in ipairs(rows) do
-            local holder = Util.New("Frame", {
-                BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, M.ChipH),
-                LayoutOrder = index, Parent = self.KeybindRows,
-            })
-
-            -- Key chip. AutomaticSize on X so a long key name is not clipped
-            -- and a short one does not leave a gap.
-            local chip = Util.New("Frame", {
-                BackgroundColor3 = row.On and Theme.Accent or Theme.Control,
-                BorderSizePixel = 0,
-                Size = UDim2.fromOffset(0, M.ChipH),
-                AutomaticSize = Enum.AutomaticSize.X,
-                Parent = holder,
-            })
-            Util.Corner(chip, M.ChipR)
-            Util.Pad(chip, nil, 0, 0, 6, 6)
-            if not row.On then Util.Stroke(chip, Theme.Line) end
-
-            local chipLabel = self:Label(chip, row.Key, {
-                Weight = "SemiBold", Size = M.SmallSize - 1,
-                Color = row.On and Theme.OnAccent or Theme.Text2,
-                Size2 = UDim2.new(0, 0, 1, 0),
-                AutoSize = Enum.AutomaticSize.X,
-                XAlign = Enum.TextXAlignment.Center, Truncate = false,
-            })
-
-            local name = self:Label(holder, row.Name, {
-                Color = row.On and Theme.Text or Theme.Text3, Size = M.SmallSize,
-                Position = UDim2.fromOffset(0, 0), Size2 = UDim2.new(1, 0, 1, 0),
-            })
-            nameLabels[#nameLabels + 1] = name
-            nameLabels[#nameLabels + 1] = chipLabel
-
-            -- The chip's width is only known after it renders, so the name is
-            -- pushed clear of it on the next frame.
-            task.defer(function()
-                if name.Parent and chip.Parent then
-                    local offset = chip.AbsoluteSize.X + 8
-                    name.Position = UDim2.fromOffset(offset, 0)
-                    name.Size = UDim2.new(1, -offset, 1, 0)
-                end
-            end)
-        end
-
-        -- Deferred and retried: TextBounds is only meaningful once rendered, and
-        -- FontFace has no synchronous measurement.
-        Type.measureAsync(nameLabels, function(widest)
-            if frame.Parent then
-                frame.Size = UDim2.fromOffset(Util.Clamp(widest + 90, 170, 300), 40)
-            end
-        end)
-    end)
-end
-
-function Library:SetKeybindListVisible(visible)
-    self:_CreateKeybindList()
-    self.ShowKeybinds = visible and true or false
-    self._keybindSignature = nil
-end
-
----------------------------------------------------------------------------------
--- WINDOW
+--   titlebar   650 x 80   dark14 @ 0.85   rounded 3
+--     (10px gap - genuinely empty, the desktop shows through)
+--   content    650 x 510  dark18          rounded 3
 --
---   root
---   |- sidebar          title block, tab list, sliding indicator
---   |- divider          1px
---   `- content          two scrolling columns of cards, one page per tab
---
--- The window is dragged by its title block, which is the only chrome that is
--- obviously not a control.
+-- A transparent root holds both so dragging moves them together; in the
+-- original they are one ImGui window drawn as two rects.
 ---------------------------------------------------------------------------------
 local Window = {}
 Window.__index = Window
@@ -1225,90 +851,106 @@ function Library:CreateWindow(config)
 
     if config.Accent then Theme.Accent = config.Accent end
     if config.MenuKey then self.MenuKey = config.MenuKey end
+    if config.Scale then self.Scale = config.Scale end
 
     local window = setmetatable({
-        Library  = self,
-        Tabs     = {},
-        TabCount = 0,
-        Title    = config.Title or "uilib",
-        Footer   = config.Footer,
+        Library = self, Tabs = {}, TabCount = 0,
+        Title = config.Title or "ATARAX",
     }, Window)
     self.Window = window
 
-    local root = self:Panel({
-        Name = "Window", BackgroundColor3 = Theme.Bg, BorderSizePixel = 0,
+    local winW, winH = S(M.WindowW), S(M.WindowH)
+    local barH = S(M.TitlebarH)
+    local gap  = S(M.TitlebarSpacing)
+    local wr   = S(M.Rounding + 1)   -- set_style: WindowRounding = rounding + 1
+
+    local root = Util.New("Frame", {
+        Name = "Window", BackgroundTransparency = 1,
         AnchorPoint = config.Center == false and Vector2.new() or Vector2.new(0.5, 0.5),
         Position = config.Center == false
             and (config.Position or UDim2.fromOffset(120, 120))
             or UDim2.fromScale(0.5, 0.5),
-        Size = config.Size or UDim2.fromOffset(M.WindowW, M.WindowH),
-        Visible = false, ClipsDescendants = true, ZIndex = 100,
-        Parent = self.ScreenGui,
+        Size = UDim2.fromOffset(winW, winH),
+        Visible = false, ZIndex = 100, Parent = self.ScreenGui,
     })
-    Util.Corner(root, M.Radius)
-    Util.Stroke(root, Theme.Line)
     window.Root = root
 
     -----------------------------------------------------------------
-    -- Sidebar
+    -- Titlebar
     -----------------------------------------------------------------
-    local sidebar = Util.New("Frame", {
-        Name = "Sidebar", BackgroundTransparency = 1,
-        Size = UDim2.new(0, M.SidebarW, 1, 0), Parent = root,
+    local titlebar = Util.New("Frame", {
+        Name = "Titlebar", BackgroundColor3 = Theme.Dark14,
+        -- 0.85 alpha in the original sits over a background blur we cannot do;
+        -- kept anyway so the titlebar still reads as a lighter plane than the
+        -- content panel rather than identical to it.
+        BackgroundTransparency = 0.15,
+        BorderSizePixel = 0,
+        Size = UDim2.fromOffset(winW, barH), Parent = root,
+    })
+    Util.Corner(titlebar, wr)
+    self:Draggable(titlebar, { root })
+
+    -- Triple grip: dark18, left corners rounded only. UICorner cannot round two
+    -- corners, so a square patch the width of the radius squares off the right.
+    local triple = Util.New("Frame", {
+        Name = "Grip", BackgroundColor3 = Theme.Dark18, BorderSizePixel = 0,
+        Size = UDim2.fromOffset(S(M.TripleW), barH), ZIndex = 2, Parent = titlebar,
+    })
+    Util.Corner(triple, wr)
+    Util.New("Frame", {
+        BackgroundColor3 = Theme.Dark18, BorderSizePixel = 0,
+        Position = UDim2.new(1, -wr, 0, 0),
+        Size = UDim2.fromOffset(wr, barH), ZIndex = 2, Parent = triple,
     })
 
-    local header = Util.New("Frame", {
-        Name = "Header", BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, 78), Parent = sidebar,
-    })
-    self:Draggable(header, root)
-
-    self:Label(header, window.Title, {
-        Weight = "SemiBold", Color = Theme.Text, Size = 15,
-        Position = UDim2.fromOffset(M.Pad, 26), Size2 = UDim2.new(1, -M.Pad * 2, 0, 18),
-    })
-
-    if window.Footer then
-        self:Label(header, window.Footer, {
-            Weight = "Regular", Color = Theme.Text3, Size = M.SmallSize,
-            Position = UDim2.fromOffset(M.Pad, 45), Size2 = UDim2.new(1, -M.Pad * 2, 0, 14),
+    for _, dy in ipairs({ -7, 0, 7 }) do
+        local dot = Util.New("Frame", {
+            BackgroundColor3 = Theme.White, BorderSizePixel = 0,
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.new(0.5, 0, 0.5, S(dy)),
+            Size = UDim2.fromOffset(S(4), S(4)), ZIndex = 3, Parent = triple,
         })
+        Util.Corner(dot, S(2))
     end
 
-    window.TabList = Util.New("Frame", {
-        Name = "Tabs", BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(0, 78),
-        Size = UDim2.new(1, 0, 1, -94), Parent = sidebar,
-    })
-    Util.Pad(window.TabList, nil, 0, 0, 10, 10)
-    Util.List(window.TabList, M.TabGap)
-
-    -- One bar that slides between tabs. Its y is derived from the tab index
-    -- rather than read off AbsolutePosition, so it is correct on the first
-    -- frame before anything has laid out.
-    window.Indicator = self:Accent(Util.New("Frame", {
-        Name = "Indicator", BorderSizePixel = 0,
-        Position = UDim2.fromOffset(2, 78 + (M.TabH - 18) / 2),
-        Size = UDim2.fromOffset(2, 18), ZIndex = 5,
-        BackgroundTransparency = 1, Parent = sidebar,
-    }), "BackgroundColor3")
-    Util.Corner(window.Indicator, 1)
-
+    -- dummy_line: a 16px vertical rule centred in a 50px gap, so it lands at
+    -- x = 25 + 25 = 50 and the tabs start at 75.
     Util.New("Frame", {
-        Name = "Divider", BackgroundColor3 = Theme.Line, BorderSizePixel = 0,
-        Position = UDim2.fromOffset(M.SidebarW, 0),
-        Size = UDim2.new(0, 1, 1, 0), Parent = root,
+        Name = "GripDivider", BackgroundColor3 = Theme.Dark34, BorderSizePixel = 0,
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.new(0, S(M.TripleW + M.TabsLineGap / 2), 0.5, 0),
+        Size = UDim2.fromOffset(1, S(16)), ZIndex = 2, Parent = titlebar,
     })
 
-    -----------------------------------------------------------------
-    -- Content
-    -----------------------------------------------------------------
-    window.Content = Util.New("Frame", {
-        Name = "Content", BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(M.SidebarW + 1, 0),
-        Size = UDim2.new(1, -(M.SidebarW + 1), 1, 0), Parent = root,
+    window.TabStrip = Util.New("Frame", {
+        Name = "Tabs", BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(S(M.TripleW + M.TabsLineGap), 0),
+        Size = UDim2.new(1, -S(M.TripleW + M.TabsLineGap), 1, 0),
+        ZIndex = 2, Parent = titlebar,
     })
-    Util.Pad(window.Content, M.Pad)
+    Util.List(window.TabStrip, S(M.TabSpacing), Enum.FillDirection.Horizontal)
+
+    -----------------------------------------------------------------
+    -- Content panel
+    -----------------------------------------------------------------
+    local content = Util.New("Frame", {
+        Name = "Content", BackgroundColor3 = Theme.Dark18, BorderSizePixel = 0,
+        Position = UDim2.fromOffset(0, barH + gap),
+        Size = UDim2.fromOffset(winW, winH - barH - gap), Parent = root,
+    })
+    Util.Corner(content, wr)
+    window.ContentFrame = content
+
+    -- ScrollingFrame has no track colour, so the dark26 track the original
+    -- draws behind its grab is a frame of its own.
+    window.ScrollTrack = Util.New("Frame", {
+        Name = "ScrollTrack", BackgroundColor3 = Theme.Dark26, BorderSizePixel = 0,
+        AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.new(1, -S(M.ContentPad) + S(M.ScrollW), 0, S(M.ContentPad)),
+        Size = UDim2.new(0, S(M.ScrollW), 1, -S(M.ContentPad * 2)),
+        Visible = false, ZIndex = 2, Parent = content,
+    })
+    Util.Corner(window.ScrollTrack, S(M.Rounding))
 
     if config.AutoShow ~= false then
         task.defer(function()
@@ -1324,109 +966,125 @@ function Library:Toggle(state)
     if state == nil then state = not self.Open end
     self.Open = state and true or false
 
-    local root = self.Window.Root
+    self.Window.Root.Visible = self.Open
     if self.Modal then self.Modal.Modal = self.Open end
-
-    if self.Open then
-        -- A short rise in. Scaling the window would resample every glyph inside
-        -- it, so position carries the motion. The resting position is whatever
-        -- it is now (the user may have dragged the window), captured before the
-        -- offset is applied.
-        local resting = root.Position
-        root.Position = resting + UDim2.fromOffset(0, 10)
-        root.Visible = true
-        Motion.to(root, { Position = resting }, Motion.Slow, Enum.EasingStyle.Quint)
-    else
+    if not self.Open then
         self:CloseAllPopups()
         self:_StopCapture()
-        root.Visible = false
     end
 end
 
 ---------------------------------------------------------------------------------
--- TABS
+-- TABS  (buttons.cpp tab_button)
+--
+-- Text only, font 18, width is the text's width, full titlebar height. Colour
+-- eases accent / hovered / inactive. No underline, no pill, no background -
+-- the colour IS the state.
 ---------------------------------------------------------------------------------
 local Tab = {}
 Tab.__index = Tab
 
-function Window:AddTab(name, icon)
+function Window:AddTab(name, _icon)
     local library = self.Library
     self.TabCount = self.TabCount + 1
     local index = self.TabCount
 
+    -- gui.cpp puts a dummy_line between tab index 3 and 4 (MISC | CONFIG).
+    -- LayoutOrder is doubled so a divider can sit on the odd number between.
+    if index == M.TabSplitAfter + 1 then
+        local holder = Util.New("Frame", {
+            Name = "TabDivider", BackgroundTransparency = 1,
+            Size = UDim2.new(0, S(M.TabSplitGap), 1, 0),
+            LayoutOrder = index * 2 - 1, Parent = self.TabStrip,
+        })
+        Util.New("Frame", {
+            BackgroundColor3 = Theme.Dark34, BorderSizePixel = 0,
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.fromScale(0.5, 0.5),
+            Size = UDim2.fromOffset(1, S(16)), Parent = holder,
+        })
+    end
+
     local tab = setmetatable({
-        Library = library,
-        Window  = self,
-        Name    = name,
-        Index   = index,
-        Cards   = {},
+        Library = library, Window = self, Name = name, Index = index,
+        Cards = {},
     }, Tab)
 
     local button = Util.New("TextButton", {
         Name = "Tab" .. index, Text = "", AutoButtonColor = false,
-        BackgroundColor3 = Theme.Control, BackgroundTransparency = 1,
-        BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, M.TabH),
-        LayoutOrder = index, Parent = self.TabList,
+        BackgroundTransparency = 1, BorderSizePixel = 0,
+        Size = UDim2.new(0, 0, 1, 0),
+        AutomaticSize = Enum.AutomaticSize.X,
+        LayoutOrder = index * 2, Parent = self.TabStrip,
     })
-    Util.Corner(button, M.TabRadius)
     tab.Button = button
 
-    local textX = 12
-    if icon then
-        tab.Icon = Util.New("ImageLabel", {
-            BackgroundTransparency = 1, Image = icon,
-            Position = UDim2.fromOffset(12, (M.TabH - 16) / 2),
-            Size = UDim2.fromOffset(16, 16),
-            ImageColor3 = Theme.Text3, ZIndex = 3, Parent = button,
-        })
-        textX = 38
-    end
-
     tab.Label = library:Label(button, name, {
-        Color = Theme.Text3, Size = M.TextSize,
-        Position = UDim2.fromOffset(textX, 0),
-        Size2 = UDim2.new(1, -(textX + 10), 1, 0), ZIndex = 3,
+        Weight = "SemiBold", Size = M.TabFontSize, Color = Theme.TextInactive,
+        XAlign = Enum.TextXAlignment.Center, Truncate = false,
+        Size2 = UDim2.new(0, 0, 1, 0), AutoSize = Enum.AutomaticSize.X,
     })
+    tab.LabelAnim = Anim.track(tab.Label, "TextColor3", Theme.TextInactive)
 
-    -- One page per tab, both columns inside it.
-    tab.Page = Util.New("Frame", {
-        Name = "Page" .. index, BackgroundTransparency = 1,
+    -----------------------------------------------------------------
+    -- Page: two columns inside one scrolling region, exactly as
+    -- gui.cpp does with begin_group / sameline / begin_group.
+    -----------------------------------------------------------------
+    tab.Page = Util.New("ScrollingFrame", {
+        Name = "Page" .. index, BackgroundTransparency = 1, BorderSizePixel = 0,
         Size = UDim2.fromScale(1, 1), Visible = false,
-        Parent = self.Content,
+        CanvasSize = UDim2.new(),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        ScrollBarThickness = S(M.ScrollW),
+        ScrollBarImageColor3 = Theme.Accent,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        ElasticBehavior = Enum.ElasticBehavior.Never,
+        VerticalScrollBarInset = Enum.ScrollBarInset.None,
+        Parent = self.ContentFrame,
     })
+    library:Accent(tab.Page, "ScrollBarImageColor3")
+    Util.Pad(tab.Page, S(M.ContentPad), S(M.ContentPad), S(M.ContentPad), S(M.ContentPad))
+    Util.List(tab.Page, S(M.ContentSpacing), Enum.FillDirection.Horizontal)
 
-    local function column(side)
-        local frame = Util.New("ScrollingFrame", {
-            Name = side, BackgroundTransparency = 1, BorderSizePixel = 0,
-            Position = side == "Left" and UDim2.new()
-                or UDim2.new(0.5, M.ColGap / 2, 0, 0),
-            Size = UDim2.new(0.5, -M.ColGap / 2, 1, 0),
-            CanvasSize = UDim2.new(),
-            AutomaticCanvasSize = Enum.AutomaticSize.Y,
-            ScrollBarThickness = 2,
-            ScrollBarImageColor3 = Theme.LineHi,
-            ScrollingDirection = Enum.ScrollingDirection.Y,
-            ElasticBehavior = Enum.ElasticBehavior.Never,
-            VerticalScrollBarInset = Enum.ScrollBarInset.None,
-            Parent = tab.Page,
+    local function column(order)
+        local frame = Util.New("Frame", {
+            Name = "Column" .. order, BackgroundTransparency = 1,
+            Size = UDim2.fromOffset(S(M.CardW), 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            LayoutOrder = order, Parent = tab.Page,
         })
-        Util.List(frame, M.CardGap)
-        Util.Pad(frame, nil, 0, M.Pad, 0, 0)
+        Util.List(frame, S(M.ContentSpacing))
         return frame
     end
 
-    tab.Left  = column("Left")
-    tab.Right = column("Right")
+    tab.Left  = column(1)
+    tab.Right = column(2)
+
+    -- init_child_anim: the card width eases 302 -> 292 when the scrollbar
+    -- appears, so the content does not jump sideways by six pixels.
+    tab.WidthAnim = Scalar.track(M.CardW, function(value)
+        local width = UDim2.fromOffset(S(value), 0)
+        tab.Left.Size, tab.Right.Size = width, width
+    end)
+
+    library:Watch(function()
+        if not tab.Page.Parent then return false end
+        if not tab.Page.Visible then return end
+        local scrolls = tab.Page.AbsoluteCanvasSize.Y > tab.Page.AbsoluteWindowSize.Y
+        tab.WidthAnim.Target = scrolls and M.CardWScroll or M.CardW
+        self.ScrollTrack.Visible = scrolls
+    end)
 
     local hovered = false
     library:Watch(function(point)
+        if not button.Parent then return false end
         local over = Util.PointInside(button, point) and library.Open
         if over ~= hovered then
             hovered = over
             tab:_Repaint()
         end
     end)
-    tab._IsHovered = function() return hovered end
+    tab._Hovered = function() return hovered end
 
     library:Connect(button.MouseButton1Click, function()
         self:SetActiveTab(tab)
@@ -1445,18 +1103,10 @@ end
 
 function Tab:_Repaint()
     local active = self.Window.ActiveTab == self
-    local hovered = self._IsHovered and self._IsHovered() or false
-
-    local textColor = active and Theme.Text
-        or (hovered and Theme.Text2 or Theme.Text3)
-
-    Motion.to(self.Label, { TextColor3 = textColor }, Motion.Fast)
-    if self.Icon then
-        Motion.to(self.Icon, { ImageColor3 = textColor }, Motion.Fast)
-    end
-    Motion.to(self.Button, {
-        BackgroundTransparency = active and 0 or (hovered and 0.5 or 1),
-    }, Motion.Fast)
+    local hovered = self._Hovered and self._Hovered() or false
+    Anim.set(self.LabelAnim,
+        active and Theme.Accent
+        or (hovered and Theme.TextHovered or Theme.TextInactive))
 end
 
 function Window:SetActiveTab(tab)
@@ -1468,134 +1118,162 @@ function Window:SetActiveTab(tab)
     local previous = self.ActiveTab
     self.ActiveTab = tab
 
+    -- gui.cpp cross-fades: alpha runs to 0 on the outgoing page, the page is
+    -- swapped at the bottom of the fade, then alpha runs back to 1. There is no
+    -- slide.
     if previous then
         previous.Page.Visible = false
         previous:_Repaint()
     end
     tab.Page.Visible = true
     tab:_Repaint()
-
-    -- Indicator slides; the page lifts. v1 slid the whole page in from +-560px,
-    -- which at this size reads as a lurch rather than a transition.
-    --
-    -- y is derived from the tab index, not read off AbsolutePosition, so it is
-    -- right on the first frame before anything has laid out. The tab list has no
-    -- top padding, so 78 (its own y) is the first tab's top.
-    local y = 78
-        + (tab.Index - 1) * (M.TabH + M.TabGap)
-        + (M.TabH - 18) / 2
-    Motion.to(self.Indicator, {
-        Position = UDim2.fromOffset(2, y),
-        BackgroundTransparency = 0,
-    }, Motion.Base, Enum.EasingStyle.Quint)
-
-    if previous then
-        for _, column in ipairs({ tab.Left, tab.Right }) do
-            column.Position = column.Position + UDim2.fromOffset(0, 6)
-            Motion.to(column, {
-                Position = column.Position - UDim2.fromOffset(0, 6),
-            }, Motion.Base, Enum.EasingStyle.Quint)
-        end
-    end
 end
 
 ---------------------------------------------------------------------------------
--- CARDS (groupboxes)
+-- CARD  (child.cpp)
 --
--- A card sizes to its rows. v1 stretched panels to fill a hand-computed slot in
--- a 10x11 grid and then scrolled their contents; here the card is as tall as
--- what is in it and the COLUMN scrolls, which is why there is no row
--- arithmetic, no ContentWidth clamp and no resize watchers anywhere below.
+-- dark22 fill, dark34 border, rounding 2, 10px horizontal padding and ZERO
+-- vertical padding or item spacing - rows butt against each other and are
+-- separated by the line each one draws along its own bottom edge.
 ---------------------------------------------------------------------------------
 local Groupbox = {}
 Groupbox.__index = Groupbox
 
-function Tab:_NewCard(name, column)
+function Tab:_NewCard(column)
     local library = self.Library
 
     local box = setmetatable({
-        Library = library,
-        Tab     = self,
-        Name    = name,
-        Order   = 0,
+        Library = library, Tab = self, Order = 0, Rows = {},
     }, Groupbox)
 
     local frame = Util.New("Frame", {
-        Name = "Card", BackgroundColor3 = Theme.Card, BorderSizePixel = 0,
+        Name = "Card", BackgroundColor3 = Theme.Dark22, BorderSizePixel = 0,
         Size = UDim2.new(1, 0, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
         LayoutOrder = #self.Cards + 1, Parent = column,
     })
-    Util.Corner(frame, M.CardRadius)
-    Util.Stroke(frame, Theme.Line)
-    Util.Pad(frame, M.CardPad)
-    Util.List(frame, M.RowGap)
-    -- Not registered for fading: the window root is already a CanvasGroup and
-    -- nesting one per card would rasterise every card into its own texture for
-    -- no visual difference.
+    Util.Corner(frame, S(M.Rounding))
+    Util.Stroke(frame, Theme.Dark34)
+    Util.Pad(frame, 0, 0, S(M.CheckboxPadX), S(M.CheckboxPadX))
+    Util.List(frame, 0)
     box.Frame = frame
-
-    if name and name ~= "" then
-        -- Smaller and dimmer than the rows it heads. A heading that is louder
-        -- than its content is what makes a dense panel hard to scan.
-        box.TitleLabel = library:Label(frame, name, {
-            Weight = "SemiBold", Color = Theme.Text3, Size = M.TitleSize,
-            Size2 = UDim2.new(1, 0, 0, 18),
-        })
-        box.TitleLabel.LayoutOrder = 0
-    end
 
     self.Cards[#self.Cards + 1] = box
     return box
 end
 
--- `weight` is accepted and ignored: cards size to their content now.
+-- The original has no card titles at all - a card is an unlabelled container
+-- and the rows inside carry all the text. A name is accepted for API
+-- compatibility and used only as the instance name.
 function Tab:AddLeftGroupbox(name, _weight)
-    return self:_NewCard(name, self.Left)
+    local box = self:_NewCard(self.Left)
+    if name then box.Frame.Name = tostring(name) end
+    return box
 end
 
 function Tab:AddRightGroupbox(name, _weight)
-    return self:_NewCard(name, self.Right)
+    local box = self:_NewCard(self.Right)
+    if name then box.Frame.Name = tostring(name) end
+    return box
 end
 
--- Compatibility shim. v1 took an ImGui grid rect; only the column survives,
--- taken from X (the grid was 9 wide, so anything past the midpoint is "right").
 function Tab:AddGroupbox(name, grid)
     local right = type(grid) == "table" and (grid.X or 0) >= 4.5
-    return self:_NewCard(name, right and self.Right or self.Left)
+    return right and self:AddRightGroupbox(name) or self:AddLeftGroupbox(name)
 end
 
--- Rows are list-layout children, so a row only has to say how tall it is.
-function Groupbox:_Row(height)
+-- Every row owns the separator beneath it, and the LAST row in a card hides
+-- its own - that is what `if (content_avail().y > 0)` does in the C++. Tracked
+-- here so adding a row re-shows the previous one's line.
+function Groupbox:_Row(height, noSeparator)
     self.Order = self.Order + 1
-    return Util.New("Frame", {
+
+    local row = Util.New("Frame", {
         Name = "Row", BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, height),
+        Size = UDim2.new(1, 0, 0, S(height)),
         LayoutOrder = self.Order, Parent = self.Frame,
     })
+    self.Rows[#self.Rows + 1] = row
+
+    -- A spacer row owns no rule. Without this a divider would show the previous
+    -- row's line, a gap, then its own - two lines where the point was one gap.
+    if noSeparator then return row, nil end
+
+    local separator = Util.New("Frame", {
+        Name = "Separator", BackgroundColor3 = Theme.Dark34, BorderSizePixel = 0,
+        AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.new(0, 0, 1, 0),
+        Size = UDim2.new(1, 0, 0, 1), Parent = row,
+    })
+
+    if self.LastSeparator then self.LastSeparator.Visible = true end
+    separator.Visible = false
+    self.LastSeparator = separator
+
+    return row, separator
 end
 
--- A chevron built from two rotated bars. Font-independent: a glyph would render
--- as a box on any family that lacks it, and a stacked-pixel triangle is exactly
--- the look this redesign is getting away from.
-function Util.Chevron(parent, color)
-    local holder = Util.New("Frame", {
-        Name = "Chevron", BackgroundTransparency = 1,
-        AnchorPoint = Vector2.new(1, 0.5),
-        Position = UDim2.new(1, -12, 0.5, 0),
-        Size = UDim2.fromOffset(12, 12), ZIndex = 3, Parent = parent,
-    })
-    local bars = {}
-    for index, spec in ipairs({ { -2.4, 45 }, { 2.4, -45 } }) do
-        bars[index] = Util.New("Frame", {
-            BackgroundColor3 = color or Theme.Text3, BorderSizePixel = 0,
+---------------------------------------------------------------------------------
+-- SHARED PIECES
+---------------------------------------------------------------------------------
+
+-- render_checkmark: ImGui strokes a polyline; two rotated bars with rounded
+-- caps is the same shape and needs no font glyph (a "tick" character is absent
+-- from most families and would render as a box).
+local function checkmark(parent)
+    local marks = {}
+    for index, spec in ipairs({
+        { 0.30, 0.62, 6, 45 },
+        { 0.60, 0.48, 11, -45 },
+    }) do
+        local bar = Util.New("Frame", {
+            BackgroundColor3 = Theme.Black, BackgroundTransparency = 1,
+            BorderSizePixel = 0,
             AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.new(0.5, spec[1], 0.5, 0),
-            Size = UDim2.fromOffset(8, 1.5),
+            Position = UDim2.fromScale(spec[1], spec[2]),
+            Size = UDim2.fromOffset(S(spec[3]), S(2)),
+            Rotation = spec[4], ZIndex = 3, Parent = parent,
+        })
+        Util.Corner(bar, S(1))
+        marks[index] = bar
+    end
+    return marks
+end
+
+-- The combo's trailing glyph is a tiny double arrow. Built from bars for the
+-- same reason as the checkmark.
+local function comboArrow(parent, x)
+    local holder = Util.New("Frame", {
+        Name = "Arrow", BackgroundTransparency = 1,
+        AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -S(x or 8), 0.5, 0),
+        Size = UDim2.fromOffset(S(8), S(11)), ZIndex = 3, Parent = parent,
+    })
+    for _, spec in ipairs({
+        { 0.20, 45, -1 }, { 0.80, -45, -1 },   -- up chevron
+        { 0.20, -45, 1 }, { 0.80, 45, 1 },     -- down chevron
+    }) do
+        Util.New("Frame", {
+            BackgroundColor3 = Theme.TextInactive, BorderSizePixel = 0,
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.new(spec[1], 0, 0.5, S(spec[3] * 3)),
+            Size = UDim2.fromOffset(S(5), 1),
             Rotation = spec[2], Parent = holder,
         })
     end
-    return holder, bars
+    return holder
+end
+
+-- Both the slider track and the combo box are a dark33 fill inside a dark42
+-- hairline at rounding 2.
+local function framedBox(parent, props)
+    local box = Util.New("Frame", props, nil)
+    box.BackgroundColor3 = Theme.Dark33
+    box.BorderSizePixel = 0
+    box.Parent = props.Parent
+    Util.Corner(box, S(M.Rounding))
+    Util.Stroke(box, Theme.Dark42)
+    return box
 end
 
 ---------------------------------------------------------------------------------
@@ -1606,22 +1284,13 @@ function Groupbox:AddLabel(text, options)
     options = options or {}
 
     local library = self.Library
-    local height = options.Wrapped and 40 or 18
-    local row = self:_Row(height)
+    local row = self:_Row(M.CheckboxH)
 
     local label = library:Label(row, text, {
-        Color = options.Special and Theme.Text or Theme.Text2,
-        Size = M.TextSize, Wrapped = options.Wrapped,
-        Truncate = not options.Wrapped,
-        YAlign = options.Wrapped and Enum.TextYAlignment.Top or Enum.TextYAlignment.Center,
+        Color = options.Special and Theme.TextActive or Theme.TextInactive,
+        Wrapped = options.Wrapped,
+        Size2 = UDim2.new(1, 0, 1, 0),
     })
-
-    if options.Wrapped then
-        row.AutomaticSize = Enum.AutomaticSize.Y
-        row.Size = UDim2.new(1, 0, 0, 0)
-        label.Size = UDim2.new(1, 0, 0, 0)
-        label.AutomaticSize = Enum.AutomaticSize.Y
-    end
 
     local object = {
         Type = "Label", Row = row, Label = label,
@@ -1632,176 +1301,68 @@ function Groupbox:AddLabel(text, options)
 end
 
 function Groupbox:AddDivider()
-    local row = self:_Row(1)
-    Util.New("Frame", {
-        BackgroundColor3 = Theme.Line, BorderSizePixel = 0,
-        Size = UDim2.new(1, 0, 0, 1), Parent = row,
-    })
+    -- Every row already rules its own bottom edge, so an explicit divider is
+    -- just a short empty row rather than another line.
+    local row = self:_Row(10, true)
     return { Type = "Divider", Row = row }
 end
 
 ---------------------------------------------------------------------------------
--- BUTTON
+-- TOGGLE  (checkbox.cpp)
 --
--- Secondary by default. `Primary = true` fills it white with dark text, which in
--- a monochrome palette is the strongest emphasis available - so at most one per
--- card, or it stops meaning anything.
+-- 15x15 box, dark33 -> accent, black checkmark fading in, label at x=25 easing
+-- inactive -> hovered -> white. The whole row is the hit target.
 ---------------------------------------------------------------------------------
-function Groupbox:AddButton(options, func)
-    if type(options) == "string" then options = { Text = options, Func = func } end
-    options = options or {}
-
-    local library = self.Library
-    local height = options.Height or M.ButtonH
-    local row = self:_Row(height)
-
-    local primary = options.Primary and true or false
-
-    local button = Util.New("TextButton", {
-        Name = "Button", Text = "", AutoButtonColor = false, BorderSizePixel = 0,
-        BackgroundColor3 = primary and Theme.Accent or Theme.Control,
-        Size = UDim2.fromScale(1, 1), Parent = row,
-    })
-    Util.Corner(button, M.FieldR)
-    if primary then
-        library:Accent(button, "BackgroundColor3")
-    else
-        Util.Stroke(button, Theme.Line)
-    end
-
-    local label = library:Label(button, options.Text or "Button", {
-        Weight = "SemiBold", Size = M.TextSize,
-        Color = primary and Theme.OnAccent or Theme.Text,
-        XAlign = Enum.TextXAlignment.Center, ZIndex = 3,
-    })
-
-    local armed = false
-
-    library:Interactive(button, function(state)
-        local transparency = 0
-        if state.Held then
-            transparency = primary and 0.25 or 0
-        elseif state.Hover then
-            transparency = primary and 0.12 or 0
-        end
-        Motion.to(button, {
-            BackgroundTransparency = transparency,
-            BackgroundColor3 = (not primary and (state.Hover or state.Held))
-                and Theme.Hover or (primary and Theme.Accent or Theme.Control),
-        }, Motion.Fast)
-    end)
-
-    library:Connect(button.MouseButton1Click, function()
-        if library:AnyPopupOpen() then return end
-
-        if options.Confirm and not armed then
-            armed = true
-            label.Text = "Click again to confirm"
-            task.delay(2.5, function()
-                if armed and label.Parent then
-                    armed = false
-                    label.Text = options.Text or "Button"
-                end
-            end)
-            return
-        end
-
-        armed = false
-        label.Text = options.Text or "Button"
-        if options.Func then
-            local ok, err = pcall(options.Func)
-            if not ok then library:Notify(tostring(err), 6, "Button error") end
-        end
-    end)
-
-    local object = { Type = "Button", Row = row, Button = button, Label = label }
-    function object:SetText(value)
-        options.Text = tostring(value)
-        label.Text = options.Text
-    end
-    function object:SetVisible(visible) row.Visible = visible and true or false end
-    return object
-end
-
----------------------------------------------------------------------------------
--- TOGGLE
---
--- A pill switch, not a checkbox. v1 drew an 8x8 square with a 1px border, which
--- is the single most dated element in an ImGui menu: it is hard to hit, hard to
--- read at a glance, and has no sensible animation. A 36x20 track with a sliding
--- knob reads instantly, is a comfortable target, and the knob travel is the
--- animation.
---
--- The switch sits at the row's right edge; addons (keybind chip, colour
--- swatches) stack leftward from it.
----------------------------------------------------------------------------------
-local ADDON_BASE = M.SwitchW + 12
+local ADDON_GAP = 10
 
 function Groupbox:_CreateToggle(index, options)
     options = options or {}
     local library = self.Library
-    local row = self:_Row(M.RowH)
+    local row = self:_Row(M.CheckboxH)
+
+    local box = Util.New("Frame", {
+        Name = "Box", BackgroundColor3 = Theme.Dark33, BorderSizePixel = 0,
+        Position = UDim2.fromOffset(0, S(M.CheckboxPadY)),
+        Size = UDim2.fromOffset(S(M.CheckboxBox), S(M.CheckboxBox)),
+        ZIndex = 2, Parent = row,
+    })
+    Util.Corner(box, S(M.Rounding))
+    local marks = checkmark(box)
 
     local label = library:Label(row, options.Text or index, {
-        Color = Theme.Text2, Size = M.TextSize,
-        Size2 = UDim2.new(1, -ADDON_BASE, 1, 0),
+        Color = Theme.TextInactive,
+        Position = UDim2.fromOffset(S(M.CheckboxPadX + M.CheckboxBox), 0),
+        Size2 = UDim2.new(1, -S(M.CheckboxPadX + M.CheckboxBox + 40), 1, 0),
+        ZIndex = 2,
     })
 
-    local track = Util.New("Frame", {
-        Name = "Track", BackgroundColor3 = Theme.Control, BorderSizePixel = 0,
-        AnchorPoint = Vector2.new(1, 0.5),
-        Position = UDim2.new(1, 0, 0.5, 0),
-        Size = UDim2.fromOffset(M.SwitchW, M.SwitchH), ZIndex = 3, Parent = row,
-    })
-    Util.Corner(track, M.SwitchH / 2)
-    local trackStroke = Util.Stroke(track, Theme.Line)
-
-    local knob = Util.New("Frame", {
-        Name = "Knob", BackgroundColor3 = Theme.Text3, BorderSizePixel = 0,
-        AnchorPoint = Vector2.new(0, 0.5),
-        Position = UDim2.new(0, 2, 0.5, 0),
-        Size = UDim2.fromOffset(M.KnobD, M.KnobD), ZIndex = 4, Parent = track,
-    })
-    Util.Corner(knob, M.KnobD / 2)
-
-    -- Covers the label but not the switch or the addons, so clicking a keybind
-    -- chip or a swatch does not also flip the toggle.
     local hit = Util.New("TextButton", {
         Name = "Hit", Text = "", AutoButtonColor = false,
         BackgroundTransparency = 1, BorderSizePixel = 0,
-        Size = UDim2.new(1, -ADDON_BASE, 1, 0), ZIndex = 2, Parent = row,
+        Size = UDim2.new(1, -40, 0, S(M.CheckboxH)), ZIndex = 3, Parent = row,
     })
 
     local toggle = {
-        Type      = "Toggle",
-        Index     = index,
-        Text      = options.Text or index,
-        Value     = options.Default and true or false,
-        Row       = row,
-        Groupbox  = self,
-        Library   = library,
-        Callbacks = {},
-        Addons    = {},
-        _hovered  = false,
+        Type = "Toggle", Index = index, Text = options.Text or index,
+        Value = options.Default and true or false,
+        Row = row, Groupbox = self, Library = library,
+        Callbacks = {}, Addons = {}, _hovered = false,
+        _BoxAnim = Anim.track(box, "BackgroundColor3", Theme.Dark33),
+        _TextAnim = Anim.track(label, "TextColor3", Theme.TextInactive),
+        _MarkAnims = {
+            Anim.track(marks[1], "BackgroundTransparency", 1),
+            Anim.track(marks[2], "BackgroundTransparency", 1),
+        },
     }
     if options.Callback then toggle.Callbacks[1] = options.Callback end
 
     function toggle:_Repaint()
-        local on = self.Value
-        Motion.to(track, {
-            BackgroundColor3 = on and Theme.Accent
-                or (self._hovered and Theme.Hover or Theme.Control),
-        }, Motion.Fast)
-        Motion.to(trackStroke, { Transparency = on and 1 or 0 }, Motion.Fast)
-        Motion.to(knob, {
-            Position = UDim2.new(0, on and (M.SwitchW - M.KnobD - 2) or 2, 0.5, 0),
-            BackgroundColor3 = on and Theme.OnAccent
-                or (self._hovered and Theme.Text2 or Theme.Text3),
-        }, Motion.Base, Enum.EasingStyle.Quint)
-        Motion.to(label, {
-            TextColor3 = on and Theme.Text
-                or (self._hovered and Theme.Text2 or Theme.Text3),
-        }, Motion.Fast)
+        Anim.set(self._BoxAnim, self.Value and Theme.Accent or Theme.Dark33)
+        Anim.set(self._TextAnim, self.Value and Theme.TextActive
+            or (self._hovered and Theme.TextHovered or Theme.TextInactive))
+        for _, mark in ipairs(self._MarkAnims) do
+            Anim.set(mark, self.Value and 0 or 1)
+        end
     end
 
     function toggle:SetValue(value, silent)
@@ -1820,36 +1381,25 @@ function Groupbox:_CreateToggle(index, options)
     end
 
     function toggle:SetVisible(visible) row.Visible = visible and true or false end
-
     function toggle:SetText(value)
-        self.Text = tostring(value)
-        label.Text = self.Text
+        self.Text = tostring(value); label.Text = self.Text
     end
 
     library:Watch(function(point)
-        local over = Util.PointInside(hit, point) or Util.PointInside(track, point)
+        if not row.Parent then return false end
+        local over = Util.PointInside(hit, point)
         if over ~= toggle._hovered then
             toggle._hovered = over
             toggle:_Repaint()
         end
     end)
 
-    local function flip()
+    library:Connect(hit.MouseButton1Click, function()
         if library:AnyPopupOpen() then return end
         toggle:SetValue(not toggle.Value)
-    end
-    library:Connect(hit.MouseButton1Click, flip)
+    end)
 
-    -- The switch itself is also a target; without this the most obvious thing
-    -- to click is the one thing that does nothing.
-    local trackButton = Util.New("TextButton", {
-        Text = "", AutoButtonColor = false, BackgroundTransparency = 1,
-        Size = UDim2.fromScale(1, 1), ZIndex = 5, Parent = track,
-    })
-    library:Connect(trackButton.MouseButton1Click, flip)
-
-    toggle._Label = label
-    toggle._Hit = hit
+    toggle._Label, toggle._Hit, toggle._Row = label, hit, row
     toggle:_Repaint()
 
     library.Toggles[index] = toggle
@@ -1857,12 +1407,11 @@ function Groupbox:_CreateToggle(index, options)
 end
 
 ---------------------------------------------------------------------------------
--- SLIDER
+-- SLIDER  (slider.cpp)
 --
--- Name left, value right, track underneath. v1 printed the value centred on the
--- fill edge, riding over the bar - legible only because the bar was 6px tall.
--- Putting it at the row's right edge means it never collides with anything and
--- the eye finds it in the same place on every slider.
+-- Name left in inactive grey, value right in white, both at y=10. A 5px track
+-- at y=33 - dark33 fill, dark42 hairline - with an accent fill and a 5x10 white
+-- grab. Total row height 48.
 ---------------------------------------------------------------------------------
 function Groupbox:AddSlider(index, options)
     options = options or {}
@@ -1875,63 +1424,61 @@ function Groupbox:AddSlider(index, options)
     local suffix   = options.Suffix or ""
     local prefix   = options.Prefix or ""
 
-    local row = self:_Row(M.SliderH)
+    local row = self:_Row(M.SliderTotalH)
 
     local label = library:Label(row, options.Text or index, {
-        Color = Theme.Text2, Size = M.TextSize,
-        Size2 = UDim2.new(1, -80, 0, 16),
+        Color = Theme.TextInactive,
+        Position = UDim2.fromOffset(0, S(M.FramePadY)),
+        Size2 = UDim2.new(1, -S(70), 0, S(13)),
     })
 
     local valueLabel = library:Label(row, "", {
-        Weight = "SemiBold", Color = Theme.Text, Size = M.TextSize,
-        XAlign = Enum.TextXAlignment.Right,
+        Color = Theme.TextActive, XAlign = Enum.TextXAlignment.Right,
         AnchorPoint = Vector2.new(1, 0),
-        Position = UDim2.new(1, 0, 0, 0),
-        Size2 = UDim2.fromOffset(90, 16),
+        Position = UDim2.new(1, 0, 0, S(M.FramePadY)),
+        Size2 = UDim2.fromOffset(S(70), S(13)), Truncate = false,
     })
 
-    -- A 4px bar is far too thin to grab, so an invisible 22px band over it is
-    -- the actual target.
-    local hit = Util.New("TextButton", {
-        Name = "Hit", Text = "", AutoButtonColor = false,
-        BackgroundTransparency = 1, BorderSizePixel = 0,
-        Position = UDim2.new(0, 0, 0, 24), Size = UDim2.new(1, 0, 0, 22),
-        ZIndex = 4, Parent = row,
-    })
+    local trackY = S(M.FramePadY) + S(13) + S(M.FramePadY)
 
-    local track = Util.New("Frame", {
-        Name = "Track", BackgroundColor3 = Theme.Control, BorderSizePixel = 0,
-        Position = UDim2.new(0, 0, 0, 32), Size = UDim2.new(1, 0, 0, M.TrackH),
+    local track = framedBox(row, {
+        Name = "Track",
+        Position = UDim2.fromOffset(0, trackY),
+        Size = UDim2.new(1, 0, 0, S(M.SliderTrackH)),
         ZIndex = 2, Parent = row,
     })
-    Util.Corner(track, M.TrackH / 2)
 
     local fill = library:Accent(Util.New("Frame", {
         Name = "Fill", BorderSizePixel = 0,
         Size = UDim2.fromScale(0, 1), ZIndex = 3, Parent = track,
     }), "BackgroundColor3")
-    Util.Corner(fill, M.TrackH / 2)
+    Util.Corner(fill, S(M.Rounding))
 
-    local knob = library:Accent(Util.New("Frame", {
-        Name = "Knob", BorderSizePixel = 0,
-        AnchorPoint = Vector2.new(0.5, 0.5),
+    local grab = Util.New("Frame", {
+        Name = "Grab", BackgroundColor3 = Theme.White, BorderSizePixel = 0,
+        AnchorPoint = Vector2.new(0, 0.5),
         Position = UDim2.fromScale(0, 0.5),
-        Size = UDim2.fromOffset(M.SliderKnob, M.SliderKnob), ZIndex = 5, Parent = track,
-    }), "BackgroundColor3")
-    Util.Corner(knob, M.SliderKnob / 2)
+        Size = UDim2.fromOffset(S(M.GrabW), S(M.GrabH)),
+        ZIndex = 4, Parent = track,
+    })
+    Util.Corner(grab, S(M.Rounding))
+
+    -- The invisible drag target spans the whole row below the labels, matching
+    -- the InvisibleButton of (width, total_y - y) in the original - a 5px track
+    -- would be unusable otherwise.
+    local hit = Util.New("TextButton", {
+        Name = "Hit", Text = "", AutoButtonColor = false,
+        BackgroundTransparency = 1, BorderSizePixel = 0,
+        Position = UDim2.fromOffset(0, S(M.SliderH)),
+        Size = UDim2.new(1, 0, 0, S(M.SliderTotalH - M.SliderH)),
+        ZIndex = 5, Parent = row,
+    })
 
     local slider = {
-        Type      = "Slider",
-        Index     = index,
-        Text      = options.Text or index,
-        Min       = minimum,
-        Max       = maximum,
-        Value     = Util.Clamp(options.Default or minimum, minimum, maximum),
-        Row       = row,
-        Library   = library,
-        Callbacks = {},
-        _hovered  = false,
-        _dragging = false,
+        Type = "Slider", Index = index, Text = options.Text or index,
+        Min = minimum, Max = maximum,
+        Value = Util.Clamp(options.Default or minimum, minimum, maximum),
+        Row = row, Library = library, Callbacks = {}, _dragging = false,
     }
     if options.Callback then slider.Callbacks[1] = options.Callback end
 
@@ -1942,22 +1489,19 @@ function Groupbox:AddSlider(index, options)
         return prefix .. text .. suffix
     end
 
+    -- The fill and grab ease toward the value (anim_w in the original) rather
+    -- than snapping, so a click at the far end slides instead of jumping.
+    slider._Anim = Scalar.track(0, function(alpha)
+        fill.Size = UDim2.new(alpha, S(2), 1, 0)
+        -- grab_rect.Max.x is pos + (width - grab_size.x) * t in the original, so
+        -- the grab's LEFT edge travels over (width - 5), not width. Without the
+        -- correction term it overhangs the track by its own width at 100%.
+        grab.Position = UDim2.new(alpha, -S(M.GrabW) * alpha, 0.5, 0)
+    end)
+
     function slider:_Repaint()
         local span = self.Max - self.Min
-        local alpha = span > 0 and ((self.Value - self.Min) / span) or 0
-
-        Motion.to(fill, { Size = UDim2.fromScale(alpha, 1) }, Motion.Fast)
-        Motion.to(knob, { Position = UDim2.fromScale(alpha, 0.5) }, Motion.Fast)
-
-        local big = self._hovered or self._dragging
-        Motion.to(knob, {
-            Size = UDim2.fromOffset(big and 14 or M.SliderKnob,
-                                    big and 14 or M.SliderKnob),
-        }, Motion.Fast)
-        Motion.to(label, {
-            TextColor3 = big and Theme.Text or Theme.Text2,
-        }, Motion.Fast)
-
+        self._Anim.Target = span > 0 and ((self.Value - self.Min) / span) or 0
         valueLabel.Text = format(self.Value)
     end
 
@@ -1984,7 +1528,7 @@ function Groupbox:AddSlider(index, options)
 
     local function valueFromX(x)
         local left = track.AbsolutePosition.X
-        local width = math.max(track.AbsoluteSize.X, 1)
+        local width = math.max(track.AbsoluteSize.X - 1, 1)
         local alpha = Util.Clamp((x - left) / width, 0, 1)
         return slider.Min + alpha * (slider.Max - slider.Min)
     end
@@ -1993,107 +1537,75 @@ function Groupbox:AddSlider(index, options)
         if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
         if library:AnyPopupOpen() then return end
         slider._dragging = true
-        -- GetMouseLocation rather than input.Position: the two are not
-        -- guaranteed to share an origin once the ScreenGui ignores the topbar
-        -- inset, and AbsolutePosition (which valueFromX compares against) is in
-        -- the GetMouseLocation space. X needs no inset correction - the inset is
-        -- vertical only - so this is also why a click applies immediately
-        -- instead of waiting a frame for the watcher.
         slider:SetValue(valueFromX(UserInputService:GetMouseLocation().X))
     end)
 
     library:Connect(UserInputService.InputEnded, function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 and slider._dragging then
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
             slider._dragging = false
-            slider:_Repaint()
         end
     end)
 
     library:Watch(function(point)
-        local over = Util.PointInside(hit, point)
-        if over ~= slider._hovered then
-            slider._hovered = over
-            slider:_Repaint()
-        end
-        if slider._dragging then
-            slider:SetValue(valueFromX(point.X))
-        end
-    end)
-
-    -- Arrow keys nudge while hovered.
-    library:Connect(UserInputService.InputBegan, function(input, processed)
-        if processed or not slider._hovered or not library.Open then return end
-        if input.KeyCode == Enum.KeyCode.Left then
-            slider:SetValue(slider.Value - step)
-        elseif input.KeyCode == Enum.KeyCode.Right then
-            slider:SetValue(slider.Value + step)
-        end
+        if not row.Parent then return false end
+        if slider._dragging then slider:SetValue(valueFromX(point.X)) end
     end)
 
     slider:_Repaint()
+    slider._Anim.Value = slider._Anim.Target
+    pcall(slider._Anim.Apply, slider._Anim.Value)
+
     library.Options[index] = slider
     return slider
 end
 
 ---------------------------------------------------------------------------------
--- DROPDOWN
+-- DROPDOWN  (combo.cpp)
 --
--- The popup lives in the popup layer, not inside the card: a card sits in a
--- clipping ScrollingFrame, so a child popup would be cut off at the card edge.
+-- Name on the left easing with hover, a 90x22 dark33 box on the right holding
+-- the preview in white at font 12 with a double-arrow glyph. The popup is the
+-- same width as the box - narrow, which is how the original reads.
 ---------------------------------------------------------------------------------
 function Groupbox:AddDropdown(index, options)
     options = options or {}
     local library = self.Library
 
-    local multi    = options.Multi and true or false
-    local hasLabel = options.Text ~= nil and options.Text ~= ""
-    local row = self:_Row(hasLabel and (16 + 6 + M.FieldH) or M.FieldH)
+    local multi = options.Multi and true or false
+    local row = self:_Row(M.ComboH)
 
-    if hasLabel then
-        library:Label(row, options.Text, {
-            Color = Theme.Text2, Size = M.TextSize,
-            Size2 = UDim2.new(1, 0, 0, 16),
-        })
-    end
-
-    local field = Util.New("TextButton", {
-        Name = "Field", Text = "", AutoButtonColor = false, BorderSizePixel = 0,
-        BackgroundColor3 = Theme.Control,
-        Position = UDim2.new(0, 0, 0, hasLabel and 22 or 0),
-        Size = UDim2.new(1, 0, 0, M.FieldH), Parent = row,
-    })
-    Util.Corner(field, M.FieldR)
-    local fieldStroke = Util.Stroke(field, Theme.Line)
-
-    local preview = library:Label(field, "", {
-        Color = Theme.Text, Size = M.TextSize,
-        Position = UDim2.fromOffset(12, 0), Size2 = UDim2.new(1, -36, 1, 0),
-        ZIndex = 3,
+    local label = library:Label(row, options.Text or index, {
+        Color = Theme.TextInactive,
+        Size2 = UDim2.new(1, -S(M.ComboBoxW + 10), 1, 0),
     })
 
-    local _, chevronBars = Util.Chevron(field, Theme.Text3)
+    local box = framedBox(row, {
+        Name = "Box",
+        AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, 0, 0.5, 0),
+        Size = UDim2.fromOffset(S(M.ComboBoxW), S(M.ComboBoxH)),
+        ZIndex = 2, Parent = row,
+    })
 
-    -- Base rotations are captured once. Reading Rotation back off the instance
-    -- and negating it would flip the chevron on every repaint rather than
-    -- tracking the open state.
-    local chevronBase = {}
-    for index2, bar in ipairs(chevronBars) do
-        chevronBase[index2] = bar.Rotation
-    end
+    local preview = library:Label(box, "", {
+        Color = Theme.TextActive, Size = 12,
+        Position = UDim2.fromOffset(S(M.ComboFrameX), 0),
+        Size2 = UDim2.new(1, -S(M.ComboFrameX + 19), 1, 0), ZIndex = 3,
+    })
+    comboArrow(box, 8)
+
+    local hit = Util.New("TextButton", {
+        Name = "Hit", Text = "", AutoButtonColor = false,
+        BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1),
+        ZIndex = 4, Parent = box,
+    })
 
     local dropdown = {
-        Type      = "Dropdown",
-        Index     = index,
-        Text      = options.Text or index,
-        Multi     = multi,
-        Values    = options.Values or {},
-        Value     = multi and {} or nil,
-        IsOpen    = false,
-        Row       = row,
-        Library   = library,
-        Callbacks = {},
-        _hovered  = false,
-        _rows     = {},
+        Type = "Dropdown", Index = index, Text = options.Text or index,
+        Multi = multi, Values = options.Values or {},
+        Value = multi and {} or nil,
+        IsOpen = false, Row = row, Library = library,
+        Callbacks = {}, _rows = {}, _hovered = false,
+        _TextAnim = Anim.track(label, "TextColor3", Theme.TextInactive),
     }
     if options.Callback then dropdown.Callbacks[1] = options.Callback end
 
@@ -2101,23 +1613,20 @@ function Groupbox:AddDropdown(index, options)
     -- Popup
     -----------------------------------------------------------------
     local popup = Util.New("Frame", {
-        Name = "DropdownPopup", BackgroundColor3 = Theme.Card, BorderSizePixel = 0,
-        Visible = false, ZIndex = 50, Parent = library.PopupLayer,
+        Name = "Popup", BackgroundColor3 = Theme.Dark33, BorderSizePixel = 0,
+        Visible = false, ClipsDescendants = true, ZIndex = 50,
+        Parent = library.PopupLayer,
     })
-    Util.Corner(popup, M.FieldR)
-    Util.Stroke(popup, Theme.LineHi)
+    Util.Corner(popup, S(M.Rounding))
+    Util.Stroke(popup, Theme.Dark42)
 
-    local list = Util.New("ScrollingFrame", {
-        BackgroundTransparency = 1, BorderSizePixel = 0,
-        Position = UDim2.fromOffset(6, 6), Size = UDim2.new(1, -12, 1, -12),
-        CanvasSize = UDim2.new(),
-        AutomaticCanvasSize = Enum.AutomaticSize.Y,
-        ScrollBarThickness = 2, ScrollBarImageColor3 = Theme.LineHi,
-        ScrollingDirection = Enum.ScrollingDirection.Y,
-        ElasticBehavior = Enum.ElasticBehavior.Never,
+    local list = Util.New("Frame", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(S(M.ComboPad), S(M.ComboPad)),
+        Size = UDim2.new(1, -S(M.ComboPad * 2), 1, -S(M.ComboPad * 2)),
         ZIndex = 51, Parent = popup,
     })
-    Util.List(list, 2)
+    Util.List(list, S(M.ComboPad))
 
     function dropdown:_PreviewText()
         if self.Multi then
@@ -2125,12 +1634,9 @@ function Groupbox:AddDropdown(index, options)
             for _, value in ipairs(self.Values) do
                 if self.Value[value] then parts[#parts + 1] = tostring(value) end
             end
-            if #parts == 0 then return options.Placeholder or "None" end
-            local text = table.concat(parts, ", ")
-            return #text > 40 and (string.sub(text, 1, 40) .. "…") or text
+            return #parts == 0 and "None" or table.concat(parts, ", ")
         end
-        if self.Value == nil then return options.Placeholder or "Select…" end
-        return tostring(self.Value)
+        return self.Value == nil and (options.Placeholder or "None") or tostring(self.Value)
     end
 
     function dropdown:_RebuildRows()
@@ -2140,45 +1646,27 @@ function Groupbox:AddDropdown(index, options)
         for order, value in ipairs(self.Values) do
             local entry = Util.New("TextButton", {
                 Name = "Option", Text = "", AutoButtonColor = false,
-                BackgroundColor3 = Theme.Control, BackgroundTransparency = 1,
-                BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, M.ListRowH - 4),
+                BackgroundTransparency = 1, BorderSizePixel = 0,
+                Size = UDim2.new(1, 0, 0, S(M.SelectableH)),
                 LayoutOrder = order, ZIndex = 52, Parent = list,
             })
-            Util.Corner(entry, 6)
 
             local text = library:Label(entry, tostring(value), {
-                Color = Theme.Text2, Size = M.TextSize,
-                Position = UDim2.fromOffset(10, 0), Size2 = UDim2.new(1, -30, 1, 0),
-                ZIndex = 53,
+                Color = Theme.TextInactive, Size = 12,
+                Size2 = UDim2.fromScale(1, 1), ZIndex = 53,
             })
 
-            -- Selection marker: a dot, not a tick. One 6px element reads as
-            -- cleanly as a glyph and cannot be missing from a font.
-            local dot = library:Accent(Util.New("Frame", {
-                BorderSizePixel = 0, BackgroundTransparency = 1,
-                AnchorPoint = Vector2.new(1, 0.5),
-                Position = UDim2.new(1, -10, 0.5, 0),
-                Size = UDim2.fromOffset(6, 6), ZIndex = 53, Parent = entry,
-            }), "BackgroundColor3")
-            Util.Corner(dot, 3)
-
-            local record = { Frame = entry, Label = text, Dot = dot, Value = value }
+            local record = {
+                Frame = entry, Label = text, Value = value,
+                Anim = Anim.track(text, "TextColor3", Theme.TextInactive),
+            }
             self._rows[#self._rows + 1] = record
 
-            -- MouseEnter/Leave rather than a frame watcher. Rows are rebuilt
-            -- every SetValues call - which for a live player list is every join
-            -- and leave - and a watcher closure per row would never be
-            -- collected, growing the per-frame list without bound. A connection
-            -- dies with its instance. It is also reliable here specifically:
-            -- the popup is the topmost thing on screen, so nothing can cover a
-            -- row and swallow the event.
             library:Connect(entry.MouseEnter, function()
-                record.Hover = true
-                self:_Repaint()
+                record.Hover = true; self:_Repaint()
             end)
             library:Connect(entry.MouseLeave, function()
-                record.Hover = false
-                self:_Repaint()
+                record.Hover = false; self:_Repaint()
             end)
 
             library:Connect(entry.MouseButton1Click, function()
@@ -2192,46 +1680,22 @@ function Groupbox:AddDropdown(index, options)
                 end
             end)
         end
-
         self:_Repaint()
     end
 
     function dropdown:_Repaint()
         preview.Text = self:_PreviewText()
 
-        -- Placeholder grey when nothing is chosen, primary when something is.
-        local empty
-        if self.Multi then
-            empty = next(self.Value or {}) == nil
-        else
-            empty = self.Value == nil
-        end
-        preview.TextColor3 = empty and Theme.Text3 or Theme.Text
-
         for _, record in ipairs(self._rows) do
             local selected = self.Multi
                 and (self.Value[record.Value] and true or false)
                 or (self.Value == record.Value)
-
-            record.Label.TextColor3 = selected and Theme.Text or Theme.Text2
-            record.Dot.BackgroundTransparency = selected and 0 or 1
-            record.Frame.BackgroundTransparency = (record.Hover or selected) and 0 or 1
-            record.Frame.BackgroundColor3 = selected and Theme.Hover or Theme.Control
+            Anim.set(record.Anim, selected and Theme.Accent
+                or (record.Hover and Theme.TextHovered or Theme.TextInactive))
         end
 
-        Motion.to(field, {
-            BackgroundColor3 = (self._hovered or self.IsOpen) and Theme.Hover or Theme.Control,
-        }, Motion.Fast)
-        Motion.to(fieldStroke, {
-            Color = self.IsOpen and Theme.LineHi or Theme.Line,
-        }, Motion.Fast)
-        -- Chevron flips to point up while the popup is open.
-        for index2, bar in ipairs(chevronBars) do
-            local want = self.IsOpen and -chevronBase[index2] or chevronBase[index2]
-            if bar.Rotation ~= want then
-                Motion.to(bar, { Rotation = want }, Motion.Fast)
-            end
-        end
+        Anim.set(self._TextAnim, self.IsOpen and Theme.TextActive
+            or (self._hovered and Theme.TextHovered or Theme.TextInactive))
     end
 
     function dropdown:_Fire()
@@ -2242,7 +1706,6 @@ function Groupbox:AddDropdown(index, options)
         if self.Multi then
             local set = {}
             if type(value) == "table" then
-                -- Accept both { Item = true } and { "Item", "Other" }.
                 if value[1] ~= nil then
                     for _, item in ipairs(value) do set[item] = true end
                 else
@@ -2296,59 +1759,62 @@ function Groupbox:AddDropdown(index, options)
     end
 
     function dropdown:_Position()
-        local rowH = M.ListRowH - 2
-        local shown = math.min(math.max(#self.Values, 1), options.MaxVisible or 7)
-        local height = shown * rowH + 12
-
-        local origin = field.AbsolutePosition
-        local below = origin.Y + field.AbsoluteSize.Y + 6
+        local count = math.max(#self.Values, 1)
+        local height = count * S(M.SelectableH) + (count - 1) * S(M.ComboPad)
+            + S(M.ComboPad * 2)
+        local origin = box.AbsolutePosition
+        local below = origin.Y + box.AbsoluteSize.Y + S(M.ComboPad)
         local viewport = library.ScreenGui.AbsoluteSize.Y
 
-        -- Flip above when there is no room below, so a dropdown at the bottom of
-        -- a column is still usable.
-        if below + height > viewport and origin.Y - height - 6 > 0 then
-            below = origin.Y - height - 6
+        if below + height > viewport and origin.Y - height - S(M.ComboPad) > 0 then
+            below = origin.Y - height - S(M.ComboPad)
         end
 
         popup.Position = UDim2.fromOffset(origin.X, below)
-        popup.Size = UDim2.fromOffset(field.AbsoluteSize.X, height)
+        self._Height = height
+        popup.Size = UDim2.fromOffset(box.AbsoluteSize.X, self._Anim and self._Anim.Value or height)
     end
+
+    -- dropdown_y eases open and shut in the original, so the popup grows out of
+    -- the box rather than appearing whole.
+    dropdown._Anim = Scalar.track(0, function(value)
+        popup.Size = UDim2.fromOffset(box.AbsoluteSize.X, math.max(value, 0))
+        popup.Visible = value > 0.5
+    end)
 
     function dropdown:Open()
         library:CloseAllPopups(self)
         self.IsOpen = true
         self:_Position()
         popup.Visible = true
-        popup.BackgroundTransparency = 1
-        Motion.to(popup, { BackgroundTransparency = 0 }, Motion.Fast)
+        self._Anim.Target = self._Height
         self:_Repaint()
     end
 
     function dropdown:Close()
         if not self.IsOpen then return end
         self.IsOpen = false
-        popup.Visible = false
+        self._Anim.Target = 0
         self:_Repaint()
     end
 
     function dropdown:HitTest(point)
-        return Util.PointInside(popup, point) or Util.PointInside(field, point)
+        return Util.PointInside(popup, point) or Util.PointInside(box, point)
     end
 
     library:RegisterPopup(dropdown)
 
     library:Watch(function(point)
-        local over = Util.PointInside(field, point)
+        if not row.Parent then return false end
+        local over = Util.PointInside(box, point) or Util.PointInside(row, point)
         if over ~= dropdown._hovered then
             dropdown._hovered = over
             dropdown:_Repaint()
         end
-        -- The column scrolls and the window drags, so an open popup has to
-        -- follow its field rather than being positioned once.
         if dropdown.IsOpen then dropdown:_Position() end
     end)
 
-    library:Connect(field.MouseButton1Click, function()
+    library:Connect(hit.MouseButton1Click, function()
         if dropdown.IsOpen then dropdown:Close() else dropdown:Open() end
     end)
 
@@ -2360,6 +1826,77 @@ function Groupbox:AddDropdown(index, options)
 end
 
 ---------------------------------------------------------------------------------
+-- BUTTON  (buttons.cpp, elements->button.size = 136x23)
+---------------------------------------------------------------------------------
+function Groupbox:AddButton(options, func)
+    if type(options) == "string" then options = { Text = options, Func = func } end
+    options = options or {}
+
+    local library = self.Library
+    local row = self:_Row(M.ButtonH + M.FramePadY * 2)
+
+    local button = framedBox(row, {
+        Name = "Button",
+        AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, 0, 0.5, 0),
+        Size = UDim2.new(1, 0, 0, S(M.ButtonH)),
+        ZIndex = 2, Parent = row,
+    })
+
+    local hit = Util.New("TextButton", {
+        Text = "", AutoButtonColor = false, BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1), ZIndex = 4, Parent = button,
+    })
+
+    local label = library:Label(button, options.Text or "Button", {
+        Color = Theme.TextInactive, XAlign = Enum.TextXAlignment.Center,
+        ZIndex = 3,
+    })
+    local textAnim = Anim.track(label, "TextColor3", Theme.TextInactive)
+
+    local armed, hovered = false, false
+
+    library:Watch(function(point)
+        if not row.Parent then return false end
+        local over = Util.PointInside(button, point)
+        if over ~= hovered then
+            hovered = over
+            Anim.set(textAnim, over and Theme.TextActive or Theme.TextInactive)
+        end
+    end)
+
+    library:Connect(hit.MouseButton1Click, function()
+        if library:AnyPopupOpen() then return end
+
+        if options.Confirm and not armed then
+            armed = true
+            label.Text = "ARE YOU SURE?"
+            task.delay(2.5, function()
+                if armed and label.Parent then
+                    armed = false
+                    label.Text = options.Text or "Button"
+                end
+            end)
+            return
+        end
+
+        armed = false
+        label.Text = options.Text or "Button"
+        if options.Func then
+            local ok, err = pcall(options.Func)
+            if not ok then library:Notify(tostring(err), 6) end
+        end
+    end)
+
+    local object = { Type = "Button", Row = row, Button = button, Label = label }
+    function object:SetText(value)
+        options.Text = tostring(value); label.Text = options.Text
+    end
+    function object:SetVisible(visible) row.Visible = visible and true or false end
+    return object
+end
+
+---------------------------------------------------------------------------------
 -- LISTBOX
 ---------------------------------------------------------------------------------
 function Groupbox:AddListbox(index, options)
@@ -2367,38 +1904,36 @@ function Groupbox:AddListbox(index, options)
     local library = self.Library
 
     local rows = options.Rows or math.max(#(options.Values or {}), 3)
-    local height = rows * (M.ListRowH - 2) + 12
-    local row = self:_Row(height)
+    -- Kept in unscaled units and scaled once at the end: _Row scales what it is
+    -- given, so handing it an already-scaled number and dividing it back out
+    -- loses a pixel to rounding at every DPI but 1.
+    local inner = rows * M.SelectableH + M.ComboPad * 2
+    local row = self:_Row(inner + M.FramePadY)
 
-    local box = Util.New("Frame", {
-        Name = "Listbox", BackgroundColor3 = Theme.Control, BorderSizePixel = 0,
-        Size = UDim2.fromScale(1, 1), Parent = row,
+    local box = framedBox(row, {
+        Name = "Listbox",
+        Position = UDim2.fromOffset(0, S(M.FramePadY / 2)),
+        Size = UDim2.new(1, 0, 0, S(inner)),
+        ZIndex = 2, Parent = row,
     })
-    Util.Corner(box, M.FieldR)
-    Util.Stroke(box, Theme.Line)
 
     local list = Util.New("ScrollingFrame", {
         BackgroundTransparency = 1, BorderSizePixel = 0,
-        Position = UDim2.fromOffset(6, 6), Size = UDim2.new(1, -12, 1, -12),
-        CanvasSize = UDim2.new(),
-        AutomaticCanvasSize = Enum.AutomaticSize.Y,
-        ScrollBarThickness = 2, ScrollBarImageColor3 = Theme.LineHi,
+        Position = UDim2.fromOffset(S(M.ComboPad), S(M.ComboPad)),
+        Size = UDim2.new(1, -S(M.ComboPad * 2), 1, -S(M.ComboPad * 2)),
+        CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        ScrollBarThickness = S(3), ScrollBarImageColor3 = Theme.Accent,
         ScrollingDirection = Enum.ScrollingDirection.Y,
         ElasticBehavior = Enum.ElasticBehavior.Never,
-        Parent = box,
+        ZIndex = 3, Parent = box,
     })
-    Util.List(list, 2)
+    library:Accent(list, "ScrollBarImageColor3")
+    Util.List(list, 0)
 
     local listbox = {
-        Type      = "Listbox",
-        Index     = index,
-        Text      = options.Text or index,
-        Values    = options.Values or {},
-        Value     = nil,
-        Row       = row,
-        Library   = library,
-        Callbacks = {},
-        _rows     = {},
+        Type = "Listbox", Index = index, Text = options.Text or index,
+        Values = options.Values or {}, Value = nil,
+        Row = row, Library = library, Callbacks = {}, _rows = {},
     }
     if options.Callback then listbox.Callbacks[1] = options.Callback end
 
@@ -2408,33 +1943,26 @@ function Groupbox:AddListbox(index, options)
 
         for order, value in ipairs(self.Values) do
             local entry = Util.New("TextButton", {
-                Name = "Row", Text = "", AutoButtonColor = false,
-                BackgroundColor3 = Theme.Hover, BackgroundTransparency = 1,
-                BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, M.ListRowH - 4),
-                LayoutOrder = order, Parent = list,
+                Text = "", AutoButtonColor = false, BackgroundTransparency = 1,
+                Size = UDim2.new(1, 0, 0, S(M.SelectableH)),
+                LayoutOrder = order, ZIndex = 4, Parent = list,
             })
-            Util.Corner(entry, 6)
-
             local text = library:Label(entry, tostring(value), {
-                Color = Theme.Text2, Size = M.TextSize,
-                Position = UDim2.fromOffset(10, 0), Size2 = UDim2.new(1, -20, 1, 0),
-                ZIndex = 3,
+                Color = Theme.TextInactive, Size = 12, ZIndex = 5,
             })
 
-            local record = { Frame = entry, Label = text, Value = value }
+            local record = {
+                Frame = entry, Label = text, Value = value,
+                Anim = Anim.track(text, "TextColor3", Theme.TextInactive),
+            }
             self._rows[#self._rows + 1] = record
 
-            -- Connections, not watchers, for the same reason as the dropdown
-            -- rows: these are rebuilt whenever the values change.
             library:Connect(entry.MouseEnter, function()
-                record.Hover = true
-                self:_Repaint()
+                record.Hover = true; self:_Repaint()
             end)
             library:Connect(entry.MouseLeave, function()
-                record.Hover = false
-                self:_Repaint()
+                record.Hover = false; self:_Repaint()
             end)
-
             library:Connect(entry.MouseButton1Click, function()
                 if library:AnyPopupOpen() then return end
                 self:SetValue(value)
@@ -2446,9 +1974,8 @@ function Groupbox:AddListbox(index, options)
     function listbox:_Repaint()
         for _, record in ipairs(self._rows) do
             local selected = self.Value == record.Value
-            record.Label.TextColor3 = selected and Theme.Text or Theme.Text2
-            record.Frame.BackgroundTransparency =
-                selected and 0 or (record.Hover and 0.5 or 1)
+            Anim.set(record.Anim, selected and Theme.Accent
+                or (record.Hover and Theme.TextHovered or Theme.TextInactive))
         end
     end
 
@@ -2495,50 +2022,37 @@ function Groupbox:AddListbox(index, options)
 end
 
 ---------------------------------------------------------------------------------
--- INPUT
+-- INPUT  (input_text.cpp padding 9,6)
 ---------------------------------------------------------------------------------
 function Groupbox:AddInput(index, options)
     options = options or {}
     local library = self.Library
+    local row = self:_Row(M.ComboH)
 
-    local hasLabel = options.Text ~= nil and options.Text ~= ""
-    local row = self:_Row(hasLabel and (16 + 6 + M.FieldH) or M.FieldH)
-
-    if hasLabel then
-        library:Label(row, options.Text, {
-            Color = Theme.Text2, Size = M.TextSize,
-            Size2 = UDim2.new(1, 0, 0, 16),
-        })
-    end
-
-    local field = Util.New("Frame", {
-        Name = "Field", BackgroundColor3 = Theme.Control, BorderSizePixel = 0,
-        Position = UDim2.new(0, 0, 0, hasLabel and 22 or 0),
-        Size = UDim2.new(1, 0, 0, M.FieldH), Parent = row,
+    local field = framedBox(row, {
+        Name = "Field",
+        AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, 0, 0.5, 0),
+        Size = UDim2.new(1, 0, 0, S(M.ComboBoxH)),
+        ZIndex = 2, Parent = row,
     })
-    Util.Corner(field, M.FieldR)
-    local stroke = Util.Stroke(field, Theme.Line)
 
     local textbox = Util.New("TextBox", {
-        Name = "Box", BackgroundTransparency = 1, BorderSizePixel = 0,
+        BackgroundTransparency = 1, BorderSizePixel = 0,
         ClearTextOnFocus = false, Text = options.Default or "",
-        PlaceholderText = options.Placeholder or "",
-        PlaceholderColor3 = Theme.Text3,
-        TextSize = M.TextSize, TextColor3 = Theme.Text,
+        PlaceholderText = options.Placeholder or options.Text or "",
+        PlaceholderColor3 = Theme.TextInactive,
+        TextSize = S(12), TextColor3 = Theme.TextActive,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd,
-        Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -24, 1, 0),
+        Position = UDim2.fromOffset(S(9), 0),
+        Size = UDim2.new(1, -S(18), 1, 0),
         ZIndex = 3, Weight = "Medium", Parent = field,
     })
 
     local input = {
-        Type      = "Input",
-        Index     = index,
-        Text      = options.Text or index,
-        Value     = options.Default or "",
-        Row       = row,
-        Library   = library,
-        Callbacks = {},
+        Type = "Input", Index = index, Text = options.Text or index,
+        Value = options.Default or "", Row = row, Library = library, Callbacks = {},
     }
     if options.Callback then input.Callbacks[1] = options.Callback end
 
@@ -2555,35 +2069,22 @@ function Groupbox:AddInput(index, options)
     end
 
     function input:SetValueSilent(value) self:SetValue(value, true) end
-
     function input:OnChanged(callback)
         self.Callbacks[#self.Callbacks + 1] = callback
         pcall(callback, self.Value)
         return self
     end
-
     function input:SetVisible(visible) row.Visible = visible and true or false end
 
-    library:Connect(textbox.Focused, function()
-        Motion.to(stroke, { Color = Theme.LineHi }, Motion.Fast)
-        Motion.to(field, { BackgroundColor3 = Theme.Hover }, Motion.Fast)
-    end)
-
-    library:Connect(textbox.FocusLost, function(enterPressed)
-        Motion.to(stroke, { Color = Theme.Line }, Motion.Fast)
-        Motion.to(field, { BackgroundColor3 = Theme.Control }, Motion.Fast)
-        if options.Finished then
+    if options.Finished then
+        library:Connect(textbox.FocusLost, function(enterPressed)
             if enterPressed or options.FireOnBlur ~= false then
                 input:SetValue(textbox.Text)
             else
                 textbox.Text = input.Value
             end
-        end
-    end)
-
-    -- `Finished = true` fires only on Enter / blur, which is what a name or a
-    -- path field wants; otherwise every keystroke fires.
-    if not options.Finished then
+        end)
+    else
         library:Connect(textbox:GetPropertyChangedSignal("Text"), function()
             input:SetValue(textbox.Text)
         end)
@@ -2594,86 +2095,96 @@ function Groupbox:AddInput(index, options)
 end
 
 ---------------------------------------------------------------------------------
--- KEY PICKER
+-- KEY PICKER  (hotkey.cpp, 12x12 cog at the row's right edge)
 --
--- A chip, sized to its own text. v1 used a fixed 26x11 box with three-letter
--- caps ("SHF", "CTR") because 9px bitmap text could not fit more; with real
--- type there is no reason to abbreviate past recognition, so it reads "Shift".
---
--- Modes:
---   Always  on whenever the parent toggle is on
---   Toggle  each press flips it
---   Hold    on only while held
---
--- Left click binds, right click cycles the mode.
+-- The original's cog is a glyph from an icon font. Fonts cannot be added here,
+-- so it is drawn: a ring plus six radial teeth. Each tooth is positioned on the
+-- circle and rotated to match, because Roblox rotates a frame about its own
+-- centre rather than about a parent origin.
 ---------------------------------------------------------------------------------
+local function cog(parent, color)
+    local holder = Util.New("Frame", {
+        Name = "Cog", BackgroundTransparency = 1,
+        Size = UDim2.fromOffset(S(M.HotkeyW), S(M.HotkeyH)),
+        ZIndex = 6, Parent = parent,
+    })
+
+    local parts = {}
+    for index = 0, 5 do
+        local angle = math.rad(index * 60)
+        local radius = S(4)
+        local tooth = Util.New("Frame", {
+            BackgroundColor3 = color, BorderSizePixel = 0,
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.new(0.5, math.cos(angle) * radius, 0.5, math.sin(angle) * radius),
+            Size = UDim2.fromOffset(S(4), S(2.5)),
+            Rotation = index * 60, Parent = holder,
+        })
+        parts[#parts + 1] = tooth
+    end
+
+    local ring = Util.New("Frame", {
+        BackgroundColor3 = color, BorderSizePixel = 0,
+        AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(S(8), S(8)), ZIndex = 7, Parent = holder,
+    })
+    Util.Corner(ring, S(4))
+    parts[#parts + 1] = ring
+
+    -- The hole has to match whatever is behind the cog, so it is filled with
+    -- the card colour rather than being transparent.
+    local hole = Util.New("Frame", {
+        BackgroundColor3 = Theme.Dark22, BorderSizePixel = 0,
+        AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(S(3.5), S(3.5)), ZIndex = 8, Parent = holder,
+    })
+    Util.Corner(hole, S(2))
+
+    return holder, parts
+end
+
 local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle, offset)
     options = options or {}
     local library = groupbox.Library
 
-    local chip = Util.New("TextButton", {
+    local button = Util.New("TextButton", {
         Name = "KeyPicker", Text = "", AutoButtonColor = false,
-        BackgroundColor3 = Theme.Control, BorderSizePixel = 0,
+        BackgroundTransparency = 1, BorderSizePixel = 0,
         AnchorPoint = Vector2.new(1, 0.5),
         Position = UDim2.new(1, -(offset or 0), 0.5, 0),
-        Size = UDim2.fromOffset(0, M.ChipH),
-        AutomaticSize = Enum.AutomaticSize.X,
+        Size = UDim2.fromOffset(S(M.HotkeyW), S(M.HotkeyH)),
         ZIndex = 6, Parent = parentRow,
     })
-    Util.Corner(chip, M.ChipR)
-    Util.Pad(chip, nil, 0, 0, 7, 7)
-    local chipStroke = Util.Stroke(chip, Theme.Line)
 
-    local label = library:Label(chip, "—", {
-        Weight = "SemiBold", Size = M.SmallSize - 1, Color = Theme.Text3,
-        XAlign = Enum.TextXAlignment.Center, Truncate = false,
-        Size2 = UDim2.new(0, 0, 1, 0), AutoSize = Enum.AutomaticSize.X,
-    })
+    local _, teeth = cog(button, Theme.TextInactive)
+    local anims = {}
+    for i, part in ipairs(teeth) do
+        anims[i] = Anim.track(part, "BackgroundColor3", Theme.TextInactive)
+    end
 
     local picker = {
-        Type       = "KeyPicker",
-        Index      = index,
-        Text       = options.Text or (parentToggle and parentToggle.Text) or index,
-        Value      = options.Default or "",
-        Mode       = options.Mode or "Toggle",
-        Active     = false,
-        ShowInList = options.NoUI ~= true,
+        Type = "KeyPicker", Index = index,
+        Text = options.Text or (parentToggle and parentToggle.Text) or index,
+        Value = options.Default or "", Mode = options.Mode or "Toggle",
+        Active = false, ShowInList = options.NoUI ~= true,
         SyncToggle = options.SyncToggleState and true or false,
-        Parent     = parentToggle,
-        Library    = library,
-        Callbacks  = {},
-        _capturing = false,
-        _hovered   = false,
+        Parent = parentToggle, Library = library, Callbacks = {},
+        _capturing = false, _hovered = false,
     }
     if options.Callback then picker.Callbacks[1] = options.Callback end
 
     function picker:_Repaint()
-        local text, textColor, fill, strokeAlpha
-
+        local color
         if self._capturing then
-            text, textColor = "…", Theme.Text
-            fill, strokeAlpha = Theme.Hover, 0
+            color = Theme.TextActive
         elseif self.Value == "" then
-            text, textColor = "—", Theme.Text3
-            fill, strokeAlpha = Theme.Control, 0
+            color = self._hovered and Theme.TextHovered or Theme.TextInactive
         elseif self:GetState() then
-            -- Live: the chip is the accent. This is the same white used by a
-            -- toggled switch, so "on" looks the same everywhere.
-            text, textColor = Util.KeyLabel(self.Value), Theme.OnAccent
-            fill, strokeAlpha = Theme.Accent, 1
+            color = Theme.Accent
         else
-            text, textColor = Util.KeyLabel(self.Value), Theme.Text2
-            fill = self._hovered and Theme.Hover or Theme.Control
-            strokeAlpha = 0
+            color = self._hovered and Theme.TextHovered or Theme.TextInactive
         end
-
-        label.Text = text
-        Motion.to(label, { TextColor3 = textColor }, Motion.Fast)
-        Motion.to(chip, { BackgroundColor3 = fill }, Motion.Fast)
-        Motion.to(chipStroke, {
-            Transparency = strokeAlpha,
-            Color = self._capturing and Theme.LineHi or Theme.Line,
-        }, Motion.Fast)
+        for _, anim in ipairs(anims) do Anim.set(anim, color) end
     end
 
     function picker:SetCapturing(state)
@@ -2681,10 +2192,9 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
         self:_Repaint()
     end
 
-    -- The key's own state, ignoring the toggle it is attached to.
-    -- SyncToggleState drives the toggle from THIS, not from GetState: GetState
-    -- folds the toggle in, so syncing from it would compute "off" for a toggle
-    -- that is off and write that straight back, leaving the bind unable to ever
+    -- The key's own state, ignoring the toggle it hangs off. SyncToggleState
+    -- drives the toggle from THIS: GetState folds the toggle in, so syncing
+    -- from it would write "off" back to an off toggle and the bind could never
     -- switch its own feature on.
     function picker:GetRawState()
         if self.Value == "" then return true end
@@ -2693,18 +2203,9 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
         return self.Active
     end
 
-    -- What a feature loop should ask: "should the thing this bind guards be
-    -- acting right now". Folds in the parent toggle, so a bind on a switched-off
-    -- feature reads off however the key is sitting - and the keybind list shows
-    -- exactly this, so the panel can never claim a dead feature is live.
     function picker:GetState()
         local parentOn = true
-        if self.Parent then
-            -- Written out rather than `self.Parent and self.Parent.Value or true`:
-            -- that idiom returns true when the parent exists and is false,
-            -- because `false or true` is true.
-            parentOn = self.Parent.Value and true or false
-        end
+        if self.Parent then parentOn = self.Parent.Value and true or false end
         return parentOn and self:GetRawState()
     end
 
@@ -2754,26 +2255,21 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
         return self
     end
 
-    function picker:SetVisible(visible) chip.Visible = visible and true or false end
-    function picker:SetRowOffset(value) chip.Position = UDim2.new(1, -value, 0.5, 0) end
-    function picker:Width() return chip.AbsoluteSize.X end
+    function picker:SetVisible(visible) button.Visible = visible and true or false end
+    function picker:SetRowOffset(value) button.Position = UDim2.new(1, -value, 0.5, 0) end
+    function picker:Width() return S(M.HotkeyW) end
 
     library:Watch(function(point)
-        local over = Util.PointInside(chip, point)
-        if over ~= picker._hovered then
-            picker._hovered = over
-            picker:_Repaint()
-        end
-        -- Hold mode gets no press/release event if the key was already down when
-        -- the mode changed, and the chip needs the live state regardless.
+        if not button.Parent then return false end
+        local over = Util.PointInside(button, point)
         local state = picker:GetState()
-        if state ~= picker._lastState then
-            picker._lastState = state
+        if over ~= picker._hovered or state ~= picker._lastState then
+            picker._hovered, picker._lastState = over, state
             picker:_Repaint()
         end
     end)
 
-    library:Connect(chip.MouseButton1Click, function()
+    library:Connect(button.MouseButton1Click, function()
         if library._capturing == picker then
             library:_StopCapture()
         else
@@ -2782,11 +2278,11 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
         end
     end)
 
-    library:Connect(chip.MouseButton2Click, function()
+    library:Connect(button.MouseButton2Click, function()
         local order = { "Always", "Toggle", "Hold" }
         local current = table.find(order, picker.Mode) or 2
         picker:SetMode(order[(current % #order) + 1])
-        library:Notify(picker.Text .. " · " .. picker.Mode, 2, "Keybind mode")
+        library:Notify(picker.Text .. " - " .. picker.Mode, 2)
     end)
 
     picker:_Repaint()
@@ -2796,9 +2292,7 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
 end
 
 ---------------------------------------------------------------------------------
--- COLOUR PICKER
---
--- The one place colour is allowed, because it is the thing being edited.
+-- COLOUR PICKER  (color_button.cpp radius 6 -> a 12px circle)
 ---------------------------------------------------------------------------------
 local function CreateColorPicker(groupbox, parentRow, index, options, offset)
     options = options or {}
@@ -2806,87 +2300,77 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
 
     local swatch = Util.New("TextButton", {
         Name = "ColorPicker", Text = "", AutoButtonColor = false,
-        BackgroundColor3 = options.Default or Color3.new(1, 1, 1),
-        BorderSizePixel = 0,
+        BackgroundColor3 = options.Default or Theme.White, BorderSizePixel = 0,
         AnchorPoint = Vector2.new(1, 0.5),
         Position = UDim2.new(1, -(offset or 0), 0.5, 0),
-        Size = UDim2.fromOffset(M.SwatchW, M.SwatchH),
+        Size = UDim2.fromOffset(S(M.ColorBtnR * 2), S(M.ColorBtnR * 2)),
         ZIndex = 6, Parent = parentRow,
     })
-    Util.Corner(swatch, M.SwatchR)
-    Util.Stroke(swatch, Theme.Line)
+    Util.Corner(swatch, S(M.ColorBtnR))
 
     local picker = {
-        Type         = "ColorPicker",
-        Index        = index,
-        Text         = options.Text or index,
-        Value        = options.Default or Color3.new(1, 1, 1),
+        Type = "ColorPicker", Index = index, Text = options.Text or index,
+        Value = options.Default or Theme.White,
         Transparency = options.Transparency or 0,
-        HasAlpha     = options.Transparency ~= nil,
-        IsOpen       = false,
-        Library      = library,
-        Callbacks    = {},
+        HasAlpha = options.Transparency ~= nil,
+        IsOpen = false, Library = library, Callbacks = {},
     }
     if options.Callback then picker.Callbacks[1] = options.Callback end
     picker.Hue, picker.Sat, picker.Val = picker.Value:ToHSV()
 
-    -----------------------------------------------------------------
-    -- Popup
-    -----------------------------------------------------------------
-    local SV_W, SV_H, HUE_W, BAR_H, GAP, PAD = 172, 148, 12, 10, 8, 10
-    local popWidth  = PAD + SV_W + GAP + HUE_W + PAD
-    local popHeight = PAD + SV_H + GAP + BAR_H + GAP + M.FieldH + PAD
+    local SV = M.CpSV
+    local popW = S(M.CpWindow.X)
+    local popH = S(picker.HasAlpha and M.CpWindow.Y or M.CpWindowNoA.Y)
+    local pad  = S(M.CpPad)
 
     local popup = Util.New("Frame", {
-        Name = "ColorPopup", BackgroundColor3 = Theme.Card, BorderSizePixel = 0,
-        Size = UDim2.fromOffset(popWidth, popHeight),
-        Visible = false, ZIndex = 60, Parent = library.PopupLayer,
+        Name = "ColorPopup", BackgroundColor3 = Theme.Dark33, BorderSizePixel = 0,
+        Size = UDim2.fromOffset(popW, popH), Visible = false, ZIndex = 60,
+        Parent = library.PopupLayer,
     })
-    Util.Corner(popup, M.CardRadius)
-    Util.Stroke(popup, Theme.LineHi)
+    Util.Corner(popup, S(M.Rounding))
+    Util.Stroke(popup, Theme.Dark42)
 
-    -- SV square: white-to-hue across, transparent-to-black down.
-    local svArea = Util.New("Frame", {
-        Name = "SV", BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
-        Position = UDim2.fromOffset(PAD, PAD),
-        Size = UDim2.fromOffset(SV_W, SV_H), ZIndex = 61, Parent = popup,
+    local sv = Util.New("Frame", {
+        BackgroundColor3 = Theme.White, BorderSizePixel = 0,
+        Position = UDim2.fromOffset(pad, pad),
+        Size = UDim2.fromOffset(S(SV.X), S(SV.Y)), ZIndex = 61, Parent = popup,
     })
-    Util.Corner(svArea, M.FieldR)
+    Util.Corner(sv, S(M.Rounding))
     local svHue = Util.New("UIGradient", {
-        Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromHSV(0, 1, 1)),
-        Parent = svArea,
+        Color = ColorSequence.new(Theme.White, Color3.fromHSV(0, 1, 1)), Parent = sv,
     })
-
-    local svShade = Util.New("Frame", {
-        BackgroundColor3 = Color3.new(0, 0, 0), BorderSizePixel = 0,
-        Size = UDim2.fromScale(1, 1), ZIndex = 62, Parent = svArea,
+    local shade = Util.New("Frame", {
+        BackgroundColor3 = Theme.Black, BorderSizePixel = 0,
+        Size = UDim2.fromScale(1, 1), ZIndex = 62, Parent = sv,
     })
-    Util.Corner(svShade, M.FieldR)
+    Util.Corner(shade, S(M.Rounding))
     Util.New("UIGradient", {
         Rotation = 90,
         Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0, 1),
-            NumberSequenceKeypoint.new(1, 0),
+            NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0),
         }),
-        Parent = svShade,
+        Parent = shade,
     })
 
     local svCursor = Util.New("Frame", {
         BackgroundTransparency = 1, BorderSizePixel = 0,
         AnchorPoint = Vector2.new(0.5, 0.5),
-        Size = UDim2.fromOffset(12, 12), ZIndex = 64, Parent = svArea,
+        Size = UDim2.fromOffset(S(M.CpCircleR * 2), S(M.CpCircleR * 2)),
+        ZIndex = 64, Parent = sv,
     })
-    Util.Corner(svCursor, 6)
-    Util.New("UIStroke", {
-        Color = Color3.new(1, 1, 1), Thickness = 2, Parent = svCursor,
-    })
+    Util.Corner(svCursor, S(M.CpCircleR))
+    Util.New("UIStroke", { Color = Theme.White, Thickness = S(1.5), Parent = svCursor })
 
+    -- Hue runs down the strip to the right of the square, grabbed by the same
+    -- 6x8 white pill the original uses.
     local hueBar = Util.New("Frame", {
-        Name = "Hue", BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
-        Position = UDim2.fromOffset(PAD + SV_W + GAP, PAD),
-        Size = UDim2.fromOffset(HUE_W, SV_H), ZIndex = 61, Parent = popup,
+        BackgroundColor3 = Theme.White, BorderSizePixel = 0,
+        Position = UDim2.fromOffset(pad + S(SV.X) + pad, pad),
+        Size = UDim2.fromOffset(popW - (pad * 3) - S(SV.X), S(SV.Y)),
+        ZIndex = 61, Parent = popup,
     })
-    Util.Corner(hueBar, HUE_W / 2)
+    Util.Corner(hueBar, S(M.Rounding))
     Util.New("UIGradient", {
         Rotation = 90,
         Color = ColorSequence.new({
@@ -2900,92 +2384,68 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
         }),
         Parent = hueBar,
     })
-
-    local hueCursor = Util.New("Frame", {
-        BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.fromScale(0.5, 0),
-        Size = UDim2.new(1, 4, 0, 3), ZIndex = 63, Parent = hueBar,
+    local hueGrab = Util.New("Frame", {
+        BackgroundColor3 = Theme.White, BorderSizePixel = 0,
+        AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0),
+        Size = UDim2.fromOffset(S(M.CpGrabH), S(M.CpGrabW)),
+        ZIndex = 63, Parent = hueBar,
     })
-    Util.Corner(hueCursor, 2)
-    Util.New("UIStroke", { Color = Theme.Bg, Thickness = 1, Parent = hueCursor })
+    Util.Corner(hueGrab, S(M.Rounding))
 
-    -- Alpha bar: the colour ramping over a flat mid-grey. A real checkerboard
-    -- would be ~40 frames for a 10px strip.
-    local alphaBar, alphaRamp, alphaCursor
+    local alphaBar, alphaRamp, alphaGrab
     if picker.HasAlpha then
         alphaBar = Util.New("Frame", {
-            Name = "Alpha", BackgroundColor3 = Theme.Hover, BorderSizePixel = 0,
-            Position = UDim2.fromOffset(PAD, PAD + SV_H + GAP),
-            Size = UDim2.fromOffset(SV_W, BAR_H), ZIndex = 61, Parent = popup,
+            BackgroundColor3 = Theme.Dark42, BorderSizePixel = 0,
+            Position = UDim2.fromOffset(pad, pad + S(SV.Y) + pad),
+            Size = UDim2.fromOffset(S(SV.X), S(M.CpBarH * 2)),
+            ZIndex = 61, Parent = popup,
         })
-        Util.Corner(alphaBar, BAR_H / 2)
-
+        Util.Corner(alphaBar, S(M.Rounding))
         alphaRamp = Util.New("Frame", {
-            Name = "Ramp", BackgroundColor3 = picker.Value, BorderSizePixel = 0,
+            BackgroundColor3 = picker.Value, BorderSizePixel = 0,
             Size = UDim2.fromScale(1, 1), ZIndex = 62, Parent = alphaBar,
         })
-        Util.Corner(alphaRamp, BAR_H / 2)
+        Util.Corner(alphaRamp, S(M.Rounding))
         Util.New("UIGradient", {
             Transparency = NumberSequence.new({
-                NumberSequenceKeypoint.new(0, 1),
-                NumberSequenceKeypoint.new(1, 0),
+                NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0),
             }),
             Parent = alphaRamp,
         })
-
-        alphaCursor = Util.New("Frame", {
-            BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
-            AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.fromScale(1, 0.5),
-            Size = UDim2.new(0, 3, 1, 4), ZIndex = 63, Parent = alphaBar,
+        alphaGrab = Util.New("Frame", {
+            BackgroundColor3 = Theme.White, BorderSizePixel = 0,
+            AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(1, 0.5),
+            Size = UDim2.fromOffset(S(M.CpGrabW), S(M.CpGrabH)),
+            ZIndex = 63, Parent = alphaBar,
         })
-        Util.Corner(alphaCursor, 2)
-        Util.New("UIStroke", { Color = Theme.Bg, Thickness = 1, Parent = alphaCursor })
+        Util.Corner(alphaGrab, S(M.Rounding))
     end
 
-    -- Hex field. Not in most pickers of this kind, but typing a known value is
-    -- the one thing an HSV square is bad at.
-    local hexField = Util.New("Frame", {
-        BackgroundColor3 = Theme.Control, BorderSizePixel = 0,
-        Position = UDim2.fromOffset(PAD, popHeight - PAD - M.FieldH),
-        Size = UDim2.fromOffset(SV_W + GAP + HUE_W, M.FieldH),
-        ZIndex = 61, Parent = popup,
-    })
-    Util.Corner(hexField, M.FieldR)
-    Util.Stroke(hexField, Theme.Line)
-
-    local hexPreview = Util.New("Frame", {
-        BackgroundColor3 = picker.Value, BorderSizePixel = 0,
-        Position = UDim2.fromOffset(8, (M.FieldH - 18) / 2),
-        Size = UDim2.fromOffset(18, 18), ZIndex = 62, Parent = hexField,
-    })
-    Util.Corner(hexPreview, 5)
-    Util.Stroke(hexPreview, Theme.Line)
-
     local hexBox = Util.New("TextBox", {
-        BackgroundTransparency = 1, BorderSizePixel = 0,
+        BackgroundColor3 = Theme.Dark22, BorderSizePixel = 0,
         ClearTextOnFocus = false, Text = "",
-        TextSize = M.TextSize, TextColor3 = Theme.Text,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        Position = UDim2.fromOffset(34, 0), Size = UDim2.new(1, -42, 1, 0),
-        ZIndex = 62, Weight = "Medium", Parent = hexField,
+        TextSize = S(12), TextColor3 = Theme.TextActive,
+        TextXAlignment = Enum.TextXAlignment.Center,
+        AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.new(0, pad, 1, -pad),
+        Size = UDim2.new(1, -pad * 2, 0, S(18)),
+        ZIndex = 62, Weight = "Medium", Parent = popup,
     })
+    Util.Corner(hexBox, S(M.Rounding))
+    Util.Stroke(hexBox, Theme.Dark42)
 
     function picker:_Repaint()
         self.Value = Color3.fromHSV(self.Hue, self.Sat, self.Val)
-
         swatch.BackgroundColor3 = self.Value
         swatch.BackgroundTransparency = self.HasAlpha and self.Transparency or 0
 
-        svHue.Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromHSV(self.Hue, 1, 1))
+        svHue.Color = ColorSequence.new(Theme.White, Color3.fromHSV(self.Hue, 1, 1))
         svCursor.Position = UDim2.fromScale(self.Sat, 1 - self.Val)
-        hueCursor.Position = UDim2.fromScale(0.5, self.Hue)
-        hexPreview.BackgroundColor3 = self.Value
+        hueGrab.Position = UDim2.fromScale(0.5, self.Hue)
 
         if alphaRamp then
             alphaRamp.BackgroundColor3 = self.Value
-            alphaCursor.Position = UDim2.fromScale(1 - self.Transparency, 0.5)
+            alphaGrab.Position = UDim2.fromScale(1 - self.Transparency, 0.5)
         end
 
         if not hexBox:IsFocused() then
@@ -3025,27 +2485,19 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
 
     function picker:SetVisible(visible) swatch.Visible = visible and true or false end
     function picker:SetRowOffset(value) swatch.Position = UDim2.new(1, -value, 0.5, 0) end
-    function picker:Width() return M.SwatchW end
+    function picker:Width() return S(M.ColorBtnR * 2) end
 
     function picker:Open()
         library:CloseAllPopups(self)
         self.IsOpen = true
-
         local origin = swatch.AbsolutePosition
         local viewport = library.ScreenGui.AbsoluteSize
-        -- Right-aligned to the swatch and clamped, so a swatch near an edge
-        -- still shows the whole popup.
-        local x = Util.Clamp(origin.X + M.SwatchW - popWidth, 8,
-                             math.max(viewport.X - popWidth - 8, 8))
-        local y = origin.Y + M.SwatchH + 8
-        if y + popHeight > viewport.Y then
-            y = math.max(origin.Y - popHeight - 8, 8)
-        end
-
+        local x = Util.Clamp(origin.X + swatch.AbsoluteSize.X - popW, 8,
+                             math.max(viewport.X - popW - 8, 8))
+        local y = origin.Y + swatch.AbsoluteSize.Y + S(M.ComboPad)
+        if y + popH > viewport.Y then y = math.max(origin.Y - popH - S(M.ComboPad), 8) end
         popup.Position = UDim2.fromOffset(x, y)
         popup.Visible = true
-        popup.BackgroundTransparency = 1
-        Motion.to(popup, { BackgroundTransparency = 0 }, Motion.Fast)
         self:_Repaint()
     end
 
@@ -3060,24 +2512,19 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
     end
 
     library:RegisterPopup(picker)
-
     library:Connect(swatch.MouseButton1Click, function()
         if picker.IsOpen then picker:Close() else picker:Open() end
     end)
 
-    -- One shared drag target rather than three sets of connections, so there is
-    -- no way to end up dragging two regions at once.
     local dragging = nil
-
     local function beginDrag(target)
         return function(input)
             if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
             dragging = target
         end
     end
-
-    library:Connect(svShade.InputBegan, beginDrag("sv"))
-    library:Connect(svArea.InputBegan, beginDrag("sv"))
+    library:Connect(shade.InputBegan, beginDrag("sv"))
+    library:Connect(sv.InputBegan, beginDrag("sv"))
     library:Connect(hueBar.InputBegan, beginDrag("hue"))
     if alphaBar then library:Connect(alphaBar.InputBegan, beginDrag("alpha")) end
 
@@ -3089,10 +2536,11 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
     end)
 
     library:Watch(function(point)
+        if not popup.Parent then return false end
         if not dragging or not picker.IsOpen then return end
 
         if dragging == "sv" then
-            local pos, size = svArea.AbsolutePosition, svArea.AbsoluteSize
+            local pos, size = sv.AbsolutePosition, sv.AbsoluteSize
             picker.Sat = Util.Clamp((point.X - pos.X) / size.X, 0, 1)
             picker.Val = 1 - Util.Clamp((point.Y - pos.Y) / size.Y, 0, 1)
         elseif dragging == "hue" then
@@ -3127,83 +2575,41 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
 end
 
 ---------------------------------------------------------------------------------
--- STANDALONE PICKERS
----------------------------------------------------------------------------------
-function Groupbox:AddKeyPicker(index, options)
-    options = options or {}
-    local row = self:_Row(M.RowH)
-    self.Library:Label(row, options.Text or index, {
-        Color = Theme.Text2, Size = M.TextSize,
-        Size2 = UDim2.new(1, -70, 1, 0),
-    })
-    return CreateKeyPicker(self, row, index, options, nil, 0)
-end
-
-function Groupbox:AddColorPicker(index, options)
-    options = options or {}
-    local row = self:_Row(M.RowH)
-    self.Library:Label(row, options.Text or index, {
-        Color = Theme.Text2, Size = M.TextSize,
-        Size2 = UDim2.new(1, -50, 1, 0),
-    })
-    return CreateColorPicker(self, row, index, options, 0)
-end
-
----------------------------------------------------------------------------------
--- TOGGLE ADDONS
+-- ADDONS
 --
--- Chainable, so a feature, its bind and its colour read as one statement:
---
---   Box:AddToggle("Boxes", { Text = "Boxes" })
---      :AddColorPicker("BoxColor", { Default = Color3.new(1, 1, 1) })
---      :AddKeyPicker("BoxKey", { Mode = "Toggle" })
---
--- Addons stack leftward from the switch. Recomputed from scratch on every
--- attach, because the chain can be written in either order and in the colour-
--- first form the swatch exists before the chip it has to make room for.
+-- checkbox.cpp stacks them from the right edge: the colour circle sits at
+-- rect.Max.x - radius, and the hotkey cog moves left by (radius + padding +
+-- hotkey width) when a colour button is present.
 ---------------------------------------------------------------------------------
 local function RelayoutAddons(toggle)
-    local offset = ADDON_BASE
-
-    if toggle.KeyPicker then
-        toggle.KeyPicker:SetRowOffset(offset)
-        -- The chip is AutomaticSize, so its width is only known once rendered.
-        -- Reserve a sane amount now and correct on the next frame.
-        offset = offset + 34 + 8
-    end
+    local offset = 0
 
     local swatches = {}
     for _, addon in ipairs(toggle.Addons) do
-        if addon.Type == "ColorPicker" then
-            addon:SetRowOffset(offset)
-            swatches[#swatches + 1] = addon
-            offset = offset + M.SwatchW + 6
-        end
+        if addon.Type == "ColorPicker" then swatches[#swatches + 1] = addon end
     end
 
-    if toggle.KeyPicker and #swatches > 0 then
-        task.defer(function()
-            local chipWidth = toggle.KeyPicker:Width()
-            if chipWidth <= 0 then return end
-            local corrected = ADDON_BASE + chipWidth + 8
-            for _, swatch in ipairs(swatches) do
-                swatch:SetRowOffset(corrected)
-                corrected = corrected + M.SwatchW + 6
-            end
-        end)
+    for _, swatch in ipairs(swatches) do
+        swatch:SetRowOffset(offset)
+        offset = offset + S(M.ColorBtnR * 2) + S(M.CheckboxPadX)
     end
 
-    -- Keep the label clear of whatever ended up on the row.
+    if toggle.KeyPicker then
+        toggle.KeyPicker:SetRowOffset(offset)
+        offset = offset + S(M.HotkeyW) + S(M.CheckboxPadX)
+    end
+
     if toggle._Label then
-        toggle._Label.Size = UDim2.new(1, -(offset + 4), 1, 0)
-        toggle._Hit.Size   = UDim2.new(1, -(offset + 4), 1, 0)
+        local reserve = offset + S(10)
+        toggle._Label.Size = UDim2.new(1, -(S(M.CheckboxPadX + M.CheckboxBox) + reserve), 1, 0)
+        toggle._Hit.Size = UDim2.new(1, -reserve, 0, S(M.CheckboxH))
     end
 end
 
 local function AttachKeyPicker(self, index, options)
     options = options or {}
     options.Text = options.Text or self.Text
-    local picker = CreateKeyPicker(self.Groupbox, self.Row, index, options, self, ADDON_BASE)
+    local picker = CreateKeyPicker(self.Groupbox, self.Row, index, options, self, 0)
     self.Addons[#self.Addons + 1] = picker
     self.KeyPicker = picker
     RelayoutAddons(self)
@@ -3211,32 +2617,325 @@ local function AttachKeyPicker(self, index, options)
 end
 
 local function AttachColorPicker(self, index, options)
-    local picker = CreateColorPicker(self.Groupbox, self.Row, index, options, ADDON_BASE)
+    local picker = CreateColorPicker(self.Groupbox, self.Row, index, options, 0)
     self.Addons[#self.Addons + 1] = picker
     self.ColorPicker = self.ColorPicker or picker
     RelayoutAddons(self)
     return self
 end
 
--- Split from _CreateToggle because the addon constructors are locals declared
--- after the toggle widget, and a toggle has to be able to attach them.
 function Groupbox:AddToggle(index, options)
     local toggle = self:_CreateToggle(index, options)
-    toggle.AddKeyPicker   = AttachKeyPicker
+    toggle.AddKeyPicker = AttachKeyPicker
     toggle.AddColorPicker = AttachColorPicker
     return toggle
 end
 
+function Groupbox:AddKeyPicker(index, options)
+    options = options or {}
+    local row = self:_Row(M.CheckboxH)
+    self.Library:Label(row, options.Text or index, {
+        Color = Theme.TextInactive, Size2 = UDim2.new(1, -S(40), 1, 0),
+    })
+    return CreateKeyPicker(self, row, index, options, nil, 0)
+end
+
+function Groupbox:AddColorPicker(index, options)
+    options = options or {}
+    local row = self:_Row(M.CheckboxH)
+    self.Library:Label(row, options.Text or index, {
+        Color = Theme.TextInactive, Size2 = UDim2.new(1, -S(30), 1, 0),
+    })
+    return CreateColorPicker(self, row, index, options, 0)
+end
+
+---------------------------------------------------------------------------------
+-- WATERMARK  (watermark.cpp)
+--
+-- A dark14 strip of dark18 blocks, 3px padding, 8px between them. Each block is
+-- its own text sized to content + (30, 20), and the trailing word is drawn in
+-- the accent colour - "ATARAX [EFT]", "360 FPS", "96 PING".
+---------------------------------------------------------------------------------
+function Library:SetWatermarkVisible(visible)
+    if self.Watermark then self.Watermark.Visible = visible and true or false end
+end
+
+function Library:SetWatermarkBlocks(blocks)
+    self:_CreateRoot()
+
+    if self.Watermark then self.Watermark:Destroy() end
+
+    local bar = Util.New("Frame", {
+        Name = "Watermark", BackgroundColor3 = Theme.Dark14,
+        BackgroundTransparency = 0.15, BorderSizePixel = 0,
+        Position = UDim2.fromOffset(S(20), S(20)),
+        Size = UDim2.fromOffset(0, 0),
+        AutomaticSize = Enum.AutomaticSize.XY,
+        ZIndex = 4000, Parent = self.ScreenGui,
+    })
+    Util.Corner(bar, S(M.Rounding))
+    Util.Pad(bar, S(3), S(3), S(3), S(3))
+    Util.List(bar, S(8), Enum.FillDirection.Horizontal)
+    self.Watermark = bar
+
+    for order, block in ipairs(blocks) do
+        local main = tostring(block[1] or block.Text or "")
+        local accent = tostring(block[2] or block.Accent or "")
+
+        local cell = Util.New("Frame", {
+            BackgroundColor3 = Theme.Dark18, BorderSizePixel = 0,
+            Size = UDim2.fromOffset(0, 0),
+            AutomaticSize = Enum.AutomaticSize.XY,
+            LayoutOrder = order, Parent = bar,
+        })
+        Util.Corner(cell, S(M.Rounding))
+        Util.Pad(cell, S(10), S(10), S(15), S(15))
+        Util.List(cell, 0, Enum.FillDirection.Horizontal)
+
+        -- RichText would be one label, but the accent colour has to stay live
+        -- for SetAccent, so the two runs are separate labels.
+        local white = self:Label(cell, main, {
+            Color = Theme.TextActive, Size = 16, Weight = "SemiBold",
+            Truncate = false, Size2 = UDim2.fromOffset(0, S(18)),
+            AutoSize = Enum.AutomaticSize.X,
+        })
+        white.LayoutOrder = 1
+
+        if accent ~= "" then
+            local tint = self:Label(cell, accent, {
+                Color = Theme.Accent, Size = 16, Weight = "SemiBold",
+                Truncate = false, Size2 = UDim2.fromOffset(0, S(18)),
+                AutoSize = Enum.AutomaticSize.X,
+            })
+            tint.LayoutOrder = 2
+            self:Accent(tint, "TextColor3")
+        end
+    end
+
+    bar.Visible = true
+    return bar
+end
+
+-- Keeps the old single-string signature working: "name | v1.0" splits on the
+-- last space so the trailing token picks up the accent, which is what every
+-- block in the original does.
+function Library:SetWatermark(text)
+    text = tostring(text)
+    local head, tail = string.match(text, "^(.*)%s(%S+)$")
+    if head then
+        return self:SetWatermarkBlocks({ { head .. " ", tail } })
+    end
+    return self:SetWatermarkBlocks({ { text, "" } })
+end
+
+---------------------------------------------------------------------------------
+-- NOTIFICATIONS  (notify.cpp)
+--
+-- Top right, 10px in. dark18 card, text, and a dark33 rail underneath whose
+-- accent fill GROWS as the notification ages - it is a progress bar toward
+-- dismissal, not a countdown draining away.
+---------------------------------------------------------------------------------
+function Library:_NotifyLayer()
+    if self.NotifyLayer and self.NotifyLayer.Parent then return self.NotifyLayer end
+    self.NotifyLayer = Util.New("Frame", {
+        Name = "Notifications", BackgroundTransparency = 1,
+        AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.new(1, -S(10), 0, S(10)),
+        Size = UDim2.new(0, S(300), 1, -S(20)),
+        ZIndex = 6000, Parent = self.ScreenGui,
+    }, {
+        Util.New("UIListLayout", {
+            HorizontalAlignment = Enum.HorizontalAlignment.Right,
+            SortOrder = Enum.SortOrder.LayoutOrder,
+            Padding = UDim.new(0, S(8)),
+        }),
+    })
+    return self.NotifyLayer
+end
+
+function Library:Notify(text, duration, title)
+    if self.Unloaded or not self.ScreenGui then return end
+    duration = duration or 3.75
+
+    local layer = self:_NotifyLayer()
+    local pad = S(10)
+
+    local card = Util.New("Frame", {
+        BackgroundColor3 = Theme.Dark18, BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Size = UDim2.fromOffset(0, 0),
+        AutomaticSize = Enum.AutomaticSize.XY,
+        Parent = layer,
+    })
+    Util.Corner(card, S(M.Rounding))
+    Util.Pad(card, pad, pad, pad, pad)
+    Util.List(card, pad)
+
+    local label = self:Label(card, title and (title .. ": " .. text) or text, {
+        Color = Theme.TextActive, Size = 13, Truncate = false,
+        Size2 = UDim2.fromOffset(0, S(16)), AutoSize = Enum.AutomaticSize.X,
+    })
+    label.LayoutOrder = 1
+    label.TextTransparency = 1
+
+    local rail = Util.New("Frame", {
+        BackgroundColor3 = Theme.Dark33, BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Size = UDim2.new(1, 0, 0, S(M.CpBarH)), LayoutOrder = 2, Parent = card,
+    })
+    Util.Corner(rail, S(M.Rounding))
+
+    local fill = self:Accent(Util.New("Frame", {
+        BorderSizePixel = 0, BackgroundTransparency = 1,
+        Size = UDim2.fromScale(0, 1), Parent = rail,
+    }), "BackgroundColor3")
+    Util.Corner(fill, S(M.Rounding))
+
+    local function fade(to)
+        for _, inst in ipairs({ card, rail, fill }) do
+            TweenService:Create(inst, TweenInfo.new(0.18), {
+                BackgroundTransparency = to,
+            }):Play()
+        end
+        TweenService:Create(label, TweenInfo.new(0.18), { TextTransparency = to }):Play()
+    end
+
+    fade(0)
+
+    task.spawn(function()
+        local started = os.clock()
+        while card.Parent do
+            local alpha = Util.Clamp((os.clock() - started) / duration, 0, 1)
+            fill.Size = UDim2.fromScale(alpha, 1)
+            if alpha >= 1 then break end
+            RunService.RenderStepped:Wait()
+        end
+        if not card.Parent then return end
+        fade(1)
+        task.wait(0.25)
+        pcall(function() card:Destroy() end)
+    end)
+end
+
+---------------------------------------------------------------------------------
+-- KEYBIND LIST
+--
+-- Not part of the original framework, but Private.lua expects one. Built in the
+-- same vocabulary: dark18 panel, dark34 hairline, a dark33 chip per key and the
+-- accent for anything currently live.
+---------------------------------------------------------------------------------
+function Library:_CreateKeybindList()
+    self:_CreateRoot()
+    if self.KeybindFrame then return end
+
+    local frame = Util.New("Frame", {
+        Name = "Keybinds", BackgroundColor3 = Theme.Dark18, BorderSizePixel = 0,
+        Position = UDim2.new(0, S(20), 0.45, 0),
+        Size = UDim2.fromOffset(S(180), 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        ZIndex = 4000, Visible = false, Active = true, Parent = self.ScreenGui,
+    })
+    Util.Corner(frame, S(M.Rounding))
+    Util.Stroke(frame, Theme.Dark34)
+    Util.Pad(frame, S(10), S(10), S(10), S(10))
+    Util.List(frame, S(6))
+    self.KeybindFrame = frame
+
+    local heading = self:Label(frame, "KEYBINDS", {
+        Color = Theme.TextInactive, Size = 12, Weight = "SemiBold",
+        Size2 = UDim2.new(1, 0, 0, S(14)),
+    })
+    heading.LayoutOrder = 0
+
+    self.KeybindRows = Util.New("Frame", {
+        BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 1, Parent = frame,
+    })
+    Util.List(self.KeybindRows, S(4))
+
+    self:Draggable(frame, { frame })
+
+    local nextPoll = 0
+
+    self:Watch(function()
+        if not self.ShowKeybinds then
+            if frame.Visible then frame.Visible = false end
+            return
+        end
+
+        local now = os.clock()
+        if now < nextPoll then return end
+        nextPoll = now + 0.15
+
+        local rows, parts = {}, {}
+        for _, picker in ipairs(self._keybinds) do
+            if picker.Value and picker.Value ~= "" and picker.ShowInList then
+                local active = picker:GetState()
+                local name = string.gsub(picker.Text, "^Enable ", "")
+                rows[#rows + 1] = { Name = name, Key = Util.KeyLabel(picker.Value), On = active }
+                parts[#parts + 1] = name .. "|" .. picker.Value .. "|" .. tostring(active)
+            end
+        end
+
+        local signature = table.concat(parts, ";")
+        frame.Visible = true
+        if signature == self._keybindSignature then return end
+        self._keybindSignature = signature
+
+        for _, child in ipairs(self.KeybindRows:GetChildren()) do
+            if child:IsA("Frame") then child:Destroy() end
+        end
+
+        if #rows == 0 then
+            local holder = Util.New("Frame", {
+                BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, S(16)),
+                LayoutOrder = 1, Parent = self.KeybindRows,
+            })
+            self:Label(holder, "None", { Color = Theme.TextInactive, Size = 12 })
+            return
+        end
+
+        for order, row in ipairs(rows) do
+            local holder = Util.New("Frame", {
+                BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, S(16)),
+                LayoutOrder = order, Parent = self.KeybindRows,
+            })
+
+            self:Label(holder, row.Name, {
+                Color = row.On and Theme.TextActive or Theme.TextInactive, Size = 12,
+                Size2 = UDim2.new(1, -S(64), 1, 0),
+            })
+
+            local chip = Util.New("Frame", {
+                BackgroundColor3 = row.On and Theme.Accent or Theme.Dark33,
+                BorderSizePixel = 0,
+                AnchorPoint = Vector2.new(1, 0.5),
+                Position = UDim2.new(1, 0, 0.5, 0),
+                Size = UDim2.fromOffset(0, S(16)),
+                AutomaticSize = Enum.AutomaticSize.X, Parent = holder,
+            })
+            Util.Corner(chip, S(M.Rounding))
+            Util.Pad(chip, 0, 0, S(6), S(6))
+
+            self:Label(chip, row.Key, {
+                Color = row.On and Theme.Black or Theme.TextHovered,
+                Size = 11, Weight = "SemiBold", Truncate = false,
+                XAlign = Enum.TextXAlignment.Center,
+                Size2 = UDim2.fromOffset(0, S(16)),
+                AutoSize = Enum.AutomaticSize.X,
+            })
+        end
+    end)
+end
+
+function Library:SetKeybindListVisible(visible)
+    self:_CreateKeybindList()
+    self.ShowKeybinds = visible and true or false
+    self._keybindSignature = nil
+end
+
 ---------------------------------------------------------------------------------
 -- SAVE MANAGER
---
---   <Folder>/settings/autoload.txt   name of the config to load on execute
---   <Folder>/configs/<name>.json     one file per config
---
--- Entries key off the explicit index passed at construction, never a widget's
--- visible text, so renaming a label does not orphan its saved value. Unknown
--- keys in a file are ignored and missing keys keep their defaults, so adding a
--- widget later is backwards compatible.
 ---------------------------------------------------------------------------------
 local SaveManager = {}
 SaveManager.__index = SaveManager
@@ -3247,14 +2946,10 @@ function Library:CreateSaveManager(config)
     if config.SubFolder then folder = folder .. "/" .. config.SubFolder end
 
     local manager = setmetatable({
-        Library = self,
-        Folder  = folder,
-        Ignore  = {},
+        Library = self, Folder = folder, Ignore = {},
     }, SaveManager)
 
-    for _, ignored in ipairs(config.Ignore or {}) do
-        manager.Ignore[ignored] = true
-    end
+    for _, ignored in ipairs(config.Ignore or {}) do manager.Ignore[ignored] = true end
 
     fs.MakeFolder(folder)
     fs.MakeFolder(folder .. "/configs")
@@ -3271,8 +2966,6 @@ end
 function SaveManager:ConfigPath(name) return self.Folder .. "/configs/" .. name .. ".json" end
 function SaveManager:AutoloadPath() return self.Folder .. "/settings/autoload.txt" end
 
--- Every option type serialises to a plain table: JSONEncode cannot represent a
--- Color3 or an Enum.
 function SaveManager:Serialize()
     local data = { Toggles = {}, Options = {} }
     local library = self.Library
@@ -3333,8 +3026,7 @@ function SaveManager:Deserialize(data)
             if option.Type == "ColorPicker" then
                 option:SetValue(
                     Color3.fromRGB(record.r or 255, record.g or 255, record.b or 255),
-                    record.a
-                )
+                    record.a)
             elseif option.Type == "KeyPicker" then
                 option:SetMode(record.mode or "Toggle", true)
                 option:SetValue(record.key or "")
@@ -3351,9 +3043,7 @@ end
 
 function SaveManager:Save(name)
     if not name or name == "" then return false, "no config name" end
-    local ok, encoded = pcall(function()
-        return HttpService:JSONEncode(self:Serialize())
-    end)
+    local ok, encoded = pcall(function() return HttpService:JSONEncode(self:Serialize()) end)
     if not ok then return false, "encode failed" end
     if not fs.Write(self:ConfigPath(name), encoded) then return false, "write failed" end
     return true
@@ -3403,22 +3093,16 @@ end
 function SaveManager:LoadAutoloadConfig()
     local name = self:GetAutoload()
     if not name then return false end
-
     local ok, err = self:Load(name)
     if ok then
-        self.Library:Notify(name, 4, "Config loaded")
+        self.Library:Notify("Loaded config " .. name, 3)
     else
-        self.Library:Notify(tostring(err), 6, "Autoload failed")
+        self.Library:Notify("Autoload failed: " .. tostring(err), 5)
     end
-    if self._autoloadLabel then
-        self._autoloadLabel:SetText("Autoload: " .. name)
-    end
+    if self._autoloadLabel then self._autoloadLabel:SetText("Autoload: " .. name) end
     return ok
 end
 
----------------------------------------------------------------------------------
--- SAVE MANAGER UI
----------------------------------------------------------------------------------
 function SaveManager:BuildConfigSection(tab, options)
     options = options or {}
     local library = self.Library
@@ -3428,60 +3112,44 @@ function SaveManager:BuildConfigSection(tab, options)
 
     local list = left:AddListbox("ConfigList", { Values = self:List(), Rows = 5 })
     local nameBox = left:AddInput("ConfigName", {
-        Placeholder = "Config name", Finished = true,
+        Text = "Config name", Placeholder = "Config name", Finished = true,
     })
 
-    -- The list and the name box drive each other: picking a config fills the
-    -- box, so Save overwrites the selected one rather than quietly creating a
-    -- near-duplicate.
     list:OnChanged(function(value)
         if value then nameBox:SetValueSilent(value) end
     end)
 
     local function refresh() list:SetValues(self:List(), true) end
 
-    left:AddButton({ Text = "Save", Primary = true, Func = function()
-        local name = nameBox.Value
-        local ok, err = self:Save(name)
+    left:AddButton({ Text = "Save", Func = function()
+        local ok, err = self:Save(nameBox.Value)
         if ok then
             refresh()
-            library:Notify(name, 3, "Config saved")
+            library:Notify("Config saved", 3)
         else
-            library:Notify(tostring(err), 5, "Save failed")
+            library:Notify("Save failed: " .. tostring(err), 5)
         end
     end })
 
     left:AddButton({ Text = "Load", Func = function()
-        local name = list.Value or nameBox.Value
-        local ok, err = self:Load(name)
-        if ok then
-            library:Notify(tostring(name), 3, "Config loaded")
-        else
-            library:Notify(tostring(err), 5, "Load failed")
-        end
+        local ok, err = self:Load(list.Value or nameBox.Value)
+        library:Notify(ok and "Config loaded" or ("Load failed: " .. tostring(err)), ok and 3 or 5)
     end })
 
     left:AddButton({ Text = "Delete", Confirm = true, Func = function()
-        local name = list.Value or nameBox.Value
-        local ok, err = self:Delete(name)
-        if ok then
-            refresh()
-            library:Notify(tostring(name), 3, "Config deleted")
-        else
-            library:Notify(tostring(err), 5, "Delete failed")
-        end
+        local ok, err = self:Delete(list.Value or nameBox.Value)
+        if ok then refresh() end
+        library:Notify(ok and "Config deleted" or ("Delete failed: " .. tostring(err)), ok and 3 or 5)
     end })
 
-    left:AddButton({ Text = "Refresh list", Func = function()
+    left:AddButton({ Text = "Refresh", Func = function()
         refresh()
         library:Notify("Config list refreshed", 2)
     end })
 
-    left:AddDivider()
-
     self._autoloadLabel = left:AddLabel("Autoload: none")
 
-    left:AddButton({ Text = "Set as autoload", Func = function()
+    left:AddButton({ Text = "Set autoload", Func = function()
         local name = list.Value or nameBox.Value
         if not name or name == "" then
             library:Notify("Select a config first", 3)
@@ -3489,7 +3157,7 @@ function SaveManager:BuildConfigSection(tab, options)
         end
         self:SetAutoload(name)
         self._autoloadLabel:SetText("Autoload: " .. name)
-        library:Notify(name .. " will load on execute", 3, "Autoload set")
+        library:Notify("Autoload set", 3)
     end })
 
     left:AddButton({ Text = "Clear autoload", Func = function()
@@ -3501,9 +3169,6 @@ function SaveManager:BuildConfigSection(tab, options)
     local current = self:GetAutoload()
     if current then self._autoloadLabel:SetText("Autoload: " .. current) end
 
-    -----------------------------------------------------------------
-    -- Interface
-    -----------------------------------------------------------------
     if options.NoMenuSection then return self end
 
     right:AddDropdown("MenuKey", {
@@ -3517,13 +3182,10 @@ function SaveManager:BuildConfigSection(tab, options)
     })
 
     right:AddColorPicker("MenuAccent", {
-        Text = "Accent", Default = Theme.Accent,
+        Text = "Accent color", Default = Theme.Accent,
         Callback = function(color) library:SetAccent(color) end,
     })
 
-    -- Defaults read live state, so a script that turned these on before
-    -- building this page does not get a switch sitting off next to a visible
-    -- panel.
     right:AddToggle("MenuKeybindList", {
         Text = "Keybind list", Default = library.ShowKeybinds,
         Callback = function(value) library:SetKeybindListVisible(value) end,
@@ -3535,28 +3197,22 @@ function SaveManager:BuildConfigSection(tab, options)
         Callback = function(value) library:SetWatermarkVisible(value) end,
     })
 
-    -- Only offered where CanvasGroup exists. On a client without it the control
-    -- would move and nothing would change, which is worse than its absence.
-    if library.CanFade then
-        right:AddSlider("MenuOpacity", {
-            Text = "Opacity", Default = 100, Min = 40, Max = 100, Suffix = "%",
-            Callback = function(value)
-                library.Opacity = value / 100
-                library:Refresh()
-            end,
-        })
-    end
-
-    right:AddDivider()
+    right:AddSlider("MenuAnimSpeed", {
+        Text = "Animations speed", Default = M.AnimSpeed, Min = 1, Max = 30,
+        Callback = function(value)
+            M.AnimSpeed = value
+            for _, entry in ipairs(Anim.List) do entry.Speed = value end
+            for _, entry in ipairs(Scalar.List) do entry.Speed = value end
+        end,
+    })
 
     right:AddButton({ Text = "Unload", Confirm = true, Func = function()
         library:Unload()
     end })
 
-    -- The menu's own settings are not part of a feature config.
     self:SetIgnoreIndexes({
-        "MenuKey", "MenuAccent", "MenuKeybindList", "MenuWatermark", "MenuOpacity",
-        "ConfigList", "ConfigName",
+        "MenuKey", "MenuAccent", "MenuKeybindList", "MenuWatermark",
+        "MenuAnimSpeed", "ConfigList", "ConfigName",
     })
 
     return self
