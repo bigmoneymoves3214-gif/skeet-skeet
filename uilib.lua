@@ -64,7 +64,11 @@ local LocalPlayer = Players.LocalPlayer
 -- PALETTE  (settings/colors.h, verbatim)
 ---------------------------------------------------------------------------------
 local Theme = {
-    Accent = Color3.fromRGB(100, 150, 255),
+    -- The original ships accent 100,150,255. White instead: in a strictly
+    -- black-and-white menu the only "colour" available is contrast, so the
+    -- accent is maximum contrast and everything idle is grey. Set
+    -- Library:SetAccent(c) to put a hue back.
+    Accent = Color3.fromRGB(255, 255, 255),
     White  = Color3.fromRGB(255, 255, 255),
     Black  = Color3.fromRGB(0, 0, 0),
 
@@ -859,7 +863,9 @@ function Library:CreateWindow(config)
     }, Window)
     self.Window = window
 
-    local winW, winH = S(M.WindowW), S(M.WindowH)
+    -- The original is a fixed 650x600 for six short tabs. A consumer with more
+    -- or longer tabs can widen it; the tab strip also auto-fits below.
+    local winW, winH = S(config.Width or M.WindowW), S(config.Height or M.WindowH)
     local barH = S(M.TitlebarH)
     local gap  = S(M.TitlebarSpacing)
     local wr   = S(M.Rounding + 1)   -- set_style: WindowRounding = rounding + 1
@@ -925,10 +931,63 @@ function Library:CreateWindow(config)
     window.TabStrip = Util.New("Frame", {
         Name = "Tabs", BackgroundTransparency = 1,
         Position = UDim2.fromOffset(S(M.TripleW + M.TabsLineGap), 0),
-        Size = UDim2.new(1, -S(M.TripleW + M.TabsLineGap), 1, 0),
+        -- A right margin, or the last tab butts against the window edge.
+        Size = UDim2.new(1, -S(M.TripleW + M.TabsLineGap + 16), 1, 0),
         ZIndex = 2, Parent = titlebar,
     })
-    Util.List(window.TabStrip, S(M.TabSpacing), Enum.FillDirection.Horizontal)
+    window.TabLayout = Util.List(window.TabStrip, S(M.TabSpacing), Enum.FillDirection.Horizontal)
+
+    -----------------------------------------------------------------
+    -- Tab auto-fit
+    --
+    -- Six short tabs fit 650px; eight longer ones do not, and the overflow just
+    -- runs off the titlebar because a UIListLayout does not wrap or shrink.
+    --
+    -- This converges over a few frames rather than solving in one: a label's
+    -- width comes from AutomaticSize, and neither that nor the layout's
+    -- AbsoluteContentSize updates within the frame that changed TextSize - so
+    -- there is nothing to measure against until the next one. It gives up
+    -- spacing first (cheap) and only then type size, and grows back the same
+    -- way if tabs are removed or the window widens.
+    -----------------------------------------------------------------
+    local fitFont, fitSpacing = M.TabFontSize, M.TabSpacing
+
+    self:Watch(function()
+        if not window.TabStrip.Parent then return false end
+        if #window.Tabs == 0 then return end
+
+        local avail = window.TabStrip.AbsoluteSize.X
+        local content = window.TabLayout.AbsoluteContentSize.X
+        if avail <= 0 or content <= 0 then return end
+
+        local changed = false
+        if content > avail then
+            if fitSpacing > 6 then
+                fitSpacing = fitSpacing - 1
+                changed = true
+            elseif fitFont > 11 then
+                fitFont = fitFont - 1
+                changed = true
+            end
+        -- The 0.9 slack is hysteresis: growing back the instant there is a
+        -- pixel spare would oscillate forever one step either side of the fit.
+        elseif content < avail * 0.9 then
+            if fitFont < M.TabFontSize then
+                fitFont = fitFont + 1
+                changed = true
+            elseif fitSpacing < M.TabSpacing then
+                fitSpacing = fitSpacing + 1
+                changed = true
+            end
+        end
+
+        if changed then
+            window.TabLayout.Padding = UDim.new(0, S(fitSpacing))
+            for _, tab in ipairs(window.Tabs) do
+                tab.Label.TextSize = S(fitFont)
+            end
+        end
+    end)
 
     -----------------------------------------------------------------
     -- Content panel
@@ -1046,10 +1105,20 @@ function Window:AddTab(name, _icon)
     Util.Pad(tab.Page, S(M.ContentPad), S(M.ContentPad), S(M.ContentPad), S(M.ContentPad))
     Util.List(tab.Page, S(M.ContentSpacing), Enum.FillDirection.Horizontal)
 
+    -- Two columns and one gap inside the padded content area. The original
+    -- hardcodes 302 because its window is a fixed 650 - deriving it instead
+    -- gives the same 302 at 650 and still fills a window the consumer widened.
+    local function columnWidth(scrolls)
+        local inner = self.ContentFrame.AbsoluteSize.X - S(M.ContentPad * 2)
+        if inner <= 0 then inner = S(M.WindowW - M.ContentPad * 2) end
+        if scrolls then inner = inner - S(M.ScrollW + 4) end
+        return math.max((inner - S(M.ContentSpacing)) / 2, S(80))
+    end
+
     local function column(order)
         local frame = Util.New("Frame", {
             Name = "Column" .. order, BackgroundTransparency = 1,
-            Size = UDim2.fromOffset(S(M.CardW), 0),
+            Size = UDim2.fromOffset(columnWidth(false), 0),
             AutomaticSize = Enum.AutomaticSize.Y,
             LayoutOrder = order, Parent = tab.Page,
         })
@@ -1060,10 +1129,10 @@ function Window:AddTab(name, _icon)
     tab.Left  = column(1)
     tab.Right = column(2)
 
-    -- init_child_anim: the card width eases 302 -> 292 when the scrollbar
-    -- appears, so the content does not jump sideways by six pixels.
-    tab.WidthAnim = Scalar.track(M.CardW, function(value)
-        local width = UDim2.fromOffset(S(value), 0)
+    -- init_child_anim: the width eases rather than snapping when the scrollbar
+    -- appears, so the content does not jump sideways the moment a card grows.
+    tab.WidthAnim = Scalar.track(columnWidth(false), function(value)
+        local width = UDim2.fromOffset(math.floor(value), 0)
         tab.Left.Size, tab.Right.Size = width, width
     end)
 
@@ -1071,7 +1140,7 @@ function Window:AddTab(name, _icon)
         if not tab.Page.Parent then return false end
         if not tab.Page.Visible then return end
         local scrolls = tab.Page.AbsoluteCanvasSize.Y > tab.Page.AbsoluteWindowSize.Y
-        tab.WidthAnim.Target = scrolls and M.CardWScroll or M.CardW
+        tab.WidthAnim.Target = columnWidth(scrolls)
         self.ScrollTrack.Visible = scrolls
     end)
 
@@ -1217,47 +1286,30 @@ end
 -- SHARED PIECES
 ---------------------------------------------------------------------------------
 
--- render_checkmark: ImGui strokes a polyline; two rotated bars with rounded
--- caps is the same shape and needs no font glyph (a "tick" character is absent
--- from most families and would render as a box).
-local function checkmark(parent)
-    local marks = {}
-    for index, spec in ipairs({
-        { 0.30, 0.62, 6, 45 },
-        { 0.60, 0.48, 11, -45 },
-    }) do
-        local bar = Util.New("Frame", {
-            BackgroundColor3 = Theme.Black, BackgroundTransparency = 1,
-            BorderSizePixel = 0,
-            AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.fromScale(spec[1], spec[2]),
-            Size = UDim2.fromOffset(S(spec[3]), S(2)),
-            Rotation = spec[4], ZIndex = 3, Parent = parent,
-        })
-        Util.Corner(bar, S(1))
-        marks[index] = bar
-    end
-    return marks
-end
-
--- The combo's trailing glyph is a tiny double arrow. Built from bars for the
--- same reason as the checkmark.
+-- The combo's trailing glyph is a tiny double arrow, built from rotated bars
+-- rather than a font glyph (an arrow character is absent from most families and
+-- would render as a box).
+--
+-- Rotation direction matters and is easy to get backwards: a horizontal bar at
+-- +45 runs DOWN to the right. So an up chevron needs -45 on its left half and
+-- +45 on its right half. Reversed, the two halves meet at the wrong ends and
+-- the pair renders as an X - which is exactly what it was doing.
 local function comboArrow(parent, x)
     local holder = Util.New("Frame", {
         Name = "Arrow", BackgroundTransparency = 1,
         AnchorPoint = Vector2.new(1, 0.5),
         Position = UDim2.new(1, -S(x or 8), 0.5, 0),
-        Size = UDim2.fromOffset(S(8), S(11)), ZIndex = 3, Parent = parent,
+        Size = UDim2.fromOffset(S(8), S(12)), ZIndex = 3, Parent = parent,
     })
     for _, spec in ipairs({
-        { 0.20, 45, -1 }, { 0.80, -45, -1 },   -- up chevron
-        { 0.20, -45, 1 }, { 0.80, 45, 1 },     -- down chevron
+        { 0.22, -45, -3 }, { 0.78, 45, -3 },   -- up chevron, sitting high
+        { 0.22, 45, 3 },   { 0.78, -45, 3 },   -- down chevron, sitting low
     }) do
         Util.New("Frame", {
             BackgroundColor3 = Theme.TextInactive, BorderSizePixel = 0,
             AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.new(spec[1], 0, 0.5, S(spec[3] * 3)),
-            Size = UDim2.fromOffset(S(5), 1),
+            Position = UDim2.new(spec[1], 0, 0.5, S(spec[3])),
+            Size = UDim2.fromOffset(S(5), math.max(1, S(1))),
             Rotation = spec[2], Parent = holder,
         })
     end
@@ -1320,6 +1372,9 @@ function Groupbox:_CreateToggle(index, options)
     local library = self.Library
     local row = self:_Row(M.CheckboxH)
 
+    -- No checkmark. The box simply fills: dark33 when off, accent when on. A
+    -- tick inside a 15px square is mostly noise at this size, and the fill
+    -- already carries the state unambiguously.
     local box = Util.New("Frame", {
         Name = "Box", BackgroundColor3 = Theme.Dark33, BorderSizePixel = 0,
         Position = UDim2.fromOffset(0, S(M.CheckboxPadY)),
@@ -1327,7 +1382,6 @@ function Groupbox:_CreateToggle(index, options)
         ZIndex = 2, Parent = row,
     })
     Util.Corner(box, S(M.Rounding))
-    local marks = checkmark(box)
 
     local label = library:Label(row, options.Text or index, {
         Color = Theme.TextInactive,
@@ -1349,10 +1403,6 @@ function Groupbox:_CreateToggle(index, options)
         Callbacks = {}, Addons = {}, _hovered = false,
         _BoxAnim = Anim.track(box, "BackgroundColor3", Theme.Dark33),
         _TextAnim = Anim.track(label, "TextColor3", Theme.TextInactive),
-        _MarkAnims = {
-            Anim.track(marks[1], "BackgroundTransparency", 1),
-            Anim.track(marks[2], "BackgroundTransparency", 1),
-        },
     }
     if options.Callback then toggle.Callbacks[1] = options.Callback end
 
@@ -1360,9 +1410,6 @@ function Groupbox:_CreateToggle(index, options)
         Anim.set(self._BoxAnim, self.Value and Theme.Accent or Theme.Dark33)
         Anim.set(self._TextAnim, self.Value and Theme.TextActive
             or (self._hovered and Theme.TextHovered or Theme.TextInactive))
-        for _, mark in ipairs(self._MarkAnims) do
-            Anim.set(mark, self.Value and 0 or 1)
-        end
     end
 
     function toggle:SetValue(value, silent)
@@ -2169,7 +2216,7 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
         Active = false, ShowInList = options.NoUI ~= true,
         SyncToggle = options.SyncToggleState and true or false,
         Parent = parentToggle, Library = library, Callbacks = {},
-        _capturing = false, _hovered = false,
+        IsOpen = false, _capturing = false, _hovered = false,
     }
     if options.Callback then picker.Callbacks[1] = options.Callback end
 
@@ -2190,6 +2237,7 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
     function picker:SetCapturing(state)
         self._capturing = state and true or false
         self:_Repaint()
+        self:_Sync()
     end
 
     -- The key's own state, ignoring the toggle it hangs off. SyncToggleState
@@ -2237,6 +2285,7 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
         self.Value = key or ""
         self.Active = false
         self:_Repaint()
+        self:_Sync()
         if not silent then self:_Fire() end
     end
 
@@ -2246,6 +2295,7 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
         self.Mode = mode or "Toggle"
         self.Active = false
         self:_Repaint()
+        self:_Sync()
         if not silent then self:_Fire() end
     end
 
@@ -2259,6 +2309,13 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
     function picker:SetRowOffset(value) button.Position = UDim2.new(1, -value, 0.5, 0) end
     function picker:Width() return S(M.HotkeyW) end
 
+    -- The panel is built further down, so every state change routes through
+    -- here rather than calling it directly and exploding on the ones that fire
+    -- during construction.
+    function picker:_Sync()
+        if self._RefreshPanel then self:_RefreshPanel() end
+    end
+
     library:Watch(function(point)
         if not button.Parent then return false end
         local over = Util.PointInside(button, point)
@@ -2269,23 +2326,142 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
         end
     end)
 
+    -----------------------------------------------------------------
+    -- Hotkey panel
+    --
+    -- The cog used to arm key capture directly, with the only feedback being a
+    -- 12px icon changing colour - which reads as the button doing nothing, and
+    -- gave no way at all to reach the mode. elements->hotkey_window in the
+    -- original is a 175x105 popup, so this is that: the bind on top, the three
+    -- modes under it.
+    -----------------------------------------------------------------
+    local panel = Util.New("Frame", {
+        Name = "HotkeyPanel", BackgroundColor3 = Theme.Dark33, BorderSizePixel = 0,
+        Size = UDim2.fromOffset(S(175), S(105)),
+        Visible = false, ZIndex = 70, Parent = library.PopupLayer,
+    })
+    Util.Corner(panel, S(M.Rounding))
+    Util.Stroke(panel, Theme.Dark42)
+    Util.Pad(panel, S(10), S(10), S(10), S(10))
+    Util.List(panel, S(8))
+
+    local heading = library:Label(panel, "KEYBIND", {
+        Color = Theme.TextInactive, Size = 11, Weight = "SemiBold",
+        Size2 = UDim2.new(1, 0, 0, S(12)),
+    })
+    heading.LayoutOrder = 1
+
+    local bindButton = Util.New("TextButton", {
+        Text = "", AutoButtonColor = false,
+        BackgroundColor3 = Theme.Dark22, BorderSizePixel = 0,
+        Size = UDim2.new(1, 0, 0, S(22)), LayoutOrder = 2, ZIndex = 71,
+        Parent = panel,
+    })
+    Util.Corner(bindButton, S(M.Rounding))
+    Util.Stroke(bindButton, Theme.Dark42)
+
+    local bindLabel = library:Label(bindButton, "NONE", {
+        Color = Theme.TextActive, Size = 12, Weight = "SemiBold",
+        XAlign = Enum.TextXAlignment.Center, ZIndex = 72,
+    })
+
+    local modeHeading = library:Label(panel, "MODE", {
+        Color = Theme.TextInactive, Size = 11, Weight = "SemiBold",
+        Size2 = UDim2.new(1, 0, 0, S(12)),
+    })
+    modeHeading.LayoutOrder = 3
+
+    local modeRow = Util.New("Frame", {
+        BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, S(20)),
+        LayoutOrder = 4, ZIndex = 71, Parent = panel,
+    })
+    Util.List(modeRow, S(4), Enum.FillDirection.Horizontal)
+
+    local modeButtons = {}
+    for order, mode in ipairs({ "Always", "Toggle", "Hold" }) do
+        local cell = Util.New("TextButton", {
+            Text = "", AutoButtonColor = false,
+            BackgroundColor3 = Theme.Dark22, BorderSizePixel = 0,
+            Size = UDim2.new(1 / 3, -S(3), 1, 0), LayoutOrder = order,
+            ZIndex = 71, Parent = modeRow,
+        })
+        Util.Corner(cell, S(M.Rounding))
+
+        local text = library:Label(cell, mode, {
+            Color = Theme.TextInactive, Size = 11,
+            XAlign = Enum.TextXAlignment.Center, Truncate = false, ZIndex = 72,
+        })
+
+        modeButtons[mode] = {
+            Frame = cell,
+            Fill = Anim.track(cell, "BackgroundColor3", Theme.Dark22),
+            Text = Anim.track(text, "TextColor3", Theme.TextInactive),
+        }
+
+        library:Connect(cell.MouseButton1Click, function()
+            picker:SetMode(mode)
+        end)
+    end
+
+    function picker:_RefreshPanel()
+        bindLabel.Text = library._capturing == self
+            and "PRESS A KEY" or Util.KeyLabel(self.Value)
+        for mode, record in pairs(modeButtons) do
+            local on = self.Mode == mode
+            Anim.set(record.Fill, on and Theme.Accent or Theme.Dark22)
+            Anim.set(record.Text, on and Theme.Black or Theme.TextInactive)
+        end
+    end
+
+    function picker:HitTest(point)
+        return Util.PointInside(panel, point) or Util.PointInside(button, point)
+    end
+
+    function picker:Close()
+        self.IsOpen = false
+        panel.Visible = false
+        if library._capturing == self then library:_StopCapture() end
+    end
+
+    function picker:Open()
+        library:CloseAllPopups(self)
+        self.IsOpen = true
+        local origin = button.AbsolutePosition
+        local viewport = library.ScreenGui.AbsoluteSize
+        local x = Util.Clamp(origin.X + S(M.HotkeyW) - S(175), 8,
+                             math.max(viewport.X - S(175) - 8, 8))
+        local y = origin.Y + S(M.HotkeyH) + S(6)
+        if y + S(105) > viewport.Y then y = math.max(origin.Y - S(105) - S(6), 8) end
+        panel.Position = UDim2.fromOffset(x, y)
+        panel.Visible = true
+        self:_RefreshPanel()
+    end
+
+    library:RegisterPopup(picker)
+
     library:Connect(button.MouseButton1Click, function()
+        if picker.IsOpen then picker:Close() else picker:Open() end
+    end)
+
+    library:Connect(bindButton.MouseButton1Click, function()
         if library._capturing == picker then
             library:_StopCapture()
         else
             library:_StopCapture()
             library:_StartCapture(picker)
         end
+        picker:_RefreshPanel()
     end)
 
+    -- Right-clicking the cog still cycles the mode without opening anything.
     library:Connect(button.MouseButton2Click, function()
         local order = { "Always", "Toggle", "Hold" }
         local current = table.find(order, picker.Mode) or 2
         picker:SetMode(order[(current % #order) + 1])
-        library:Notify(picker.Text .. " - " .. picker.Mode, 2)
     end)
 
     picker:_Repaint()
+    picker:_RefreshPanel()
     library._keybinds[#library._keybinds + 1] = picker
     library.Options[index] = picker
     return picker
@@ -2729,6 +2905,80 @@ function Library:SetWatermark(text)
 end
 
 ---------------------------------------------------------------------------------
+-- TOPBAR
+--
+-- watermark.cpp's strip, live: "SYS [ROBLOX] | 142 FPS | 38 PING | 21:30:45".
+-- The blocks are rebuilt only when a value actually changes, because rebuilding
+-- four auto-sized frames every frame for a clock that ticks once a second is
+-- most of a frame's UI budget spent on nothing.
+---------------------------------------------------------------------------------
+function Library:SetTopbarVisible(visible)
+    self.TopbarEnabled = visible and true or false
+
+    if not self.TopbarEnabled then
+        if self.Watermark then self.Watermark.Visible = false end
+        return
+    end
+
+    self:_CreateRoot()
+
+    -- Built once. The blocks are auto-sized frames, and tearing four of them
+    -- down and back up twice a second to move a clock is a lot of layout work
+    -- for a string change; the labels are kept and only their text is written.
+    if not self._topbarCells then
+        self:SetWatermarkBlocks({
+            { self.TopbarTitle or "SYS ", self.TopbarTag or "[ROBLOX]" },
+            { "0 ", "FPS" },
+            { "0 ", "PING" },
+            { "00:00:00", "" },
+        })
+
+        self._topbarCells = {}
+        for _, cell in ipairs(self.Watermark:GetChildren()) do
+            if cell:IsA("Frame") then
+                local main
+                for _, child in ipairs(cell:GetChildren()) do
+                    if child:IsA("TextLabel") and child.LayoutOrder == 1 then main = child end
+                end
+                if main then
+                    self._topbarCells[cell.LayoutOrder] = main
+                end
+            end
+        end
+    end
+
+    self.Watermark.Visible = true
+
+    if self._topbarWatcher then return end
+
+    self._topbarWatcher = self:Watch(function(_, dt)
+        if not self.TopbarEnabled or not self.Watermark then return end
+
+        -- Smoothed, or the readout flickers through a 20-frame spread every
+        -- time it is sampled.
+        if dt and dt > 0 then
+            local instant = 1 / dt
+            self._fps = self._fps and (self._fps + (instant - self._fps) * 0.1) or instant
+        end
+
+        local now = os.clock()
+        if self._topbarNext and now < self._topbarNext then return end
+        self._topbarNext = now + 0.5
+
+        local ping = 0
+        pcall(function()
+            ping = math.floor(game:GetService("Stats").Network
+                .ServerStatsItem["Data Ping"]:GetValue() + 0.5)
+        end)
+
+        local cells = self._topbarCells
+        if cells[2] then cells[2].Text = math.floor((self._fps or 0) + 0.5) .. " " end
+        if cells[3] then cells[3].Text = ping .. " " end
+        if cells[4] then cells[4].Text = os.date("%H:%M:%S") end
+    end)
+end
+
+---------------------------------------------------------------------------------
 -- NOTIFICATIONS  (notify.cpp)
 --
 -- Top right, 10px in. dark18 card, text, and a dark33 rail underneath whose
@@ -2737,15 +2987,19 @@ end
 ---------------------------------------------------------------------------------
 function Library:_NotifyLayer()
     if self.NotifyLayer and self.NotifyLayer.Parent then return self.NotifyLayer end
+    -- Bottom right, stacking upward. The original puts them top right, but the
+    -- top right is where the topbar lives and two stacks fighting for the same
+    -- corner is how you end up reading neither.
     self.NotifyLayer = Util.New("Frame", {
         Name = "Notifications", BackgroundTransparency = 1,
-        AnchorPoint = Vector2.new(1, 0),
-        Position = UDim2.new(1, -S(10), 0, S(10)),
+        AnchorPoint = Vector2.new(1, 1),
+        Position = UDim2.new(1, -S(10), 1, -S(10)),
         Size = UDim2.new(0, S(300), 1, -S(20)),
         ZIndex = 6000, Parent = self.ScreenGui,
     }, {
         Util.New("UIListLayout", {
             HorizontalAlignment = Enum.HorizontalAlignment.Right,
+            VerticalAlignment = Enum.VerticalAlignment.Bottom,
             SortOrder = Enum.SortOrder.LayoutOrder,
             Padding = UDim.new(0, S(8)),
         }),
@@ -3191,10 +3445,10 @@ function SaveManager:BuildConfigSection(tab, options)
         Callback = function(value) library:SetKeybindListVisible(value) end,
     })
 
-    right:AddToggle("MenuWatermark", {
-        Text = "Watermark",
-        Default = (library.Watermark ~= nil) and library.Watermark.Visible or false,
-        Callback = function(value) library:SetWatermarkVisible(value) end,
+    right:AddToggle("MenuTopbar", {
+        Text = "Topbar",
+        Default = library.TopbarEnabled and true or false,
+        Callback = function(value) library:SetTopbarVisible(value) end,
     })
 
     right:AddSlider("MenuAnimSpeed", {
@@ -3211,7 +3465,7 @@ function SaveManager:BuildConfigSection(tab, options)
     end })
 
     self:SetIgnoreIndexes({
-        "MenuKey", "MenuAccent", "MenuKeybindList", "MenuWatermark",
+        "MenuKey", "MenuAccent", "MenuKeybindList", "MenuTopbar",
         "MenuAnimSpeed", "ConfigList", "ConfigName",
     })
 
