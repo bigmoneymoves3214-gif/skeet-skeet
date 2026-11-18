@@ -363,6 +363,17 @@ local KEY_LABELS = {
     MB1 = "M1", MB2 = "M2", MB3 = "M3", MB4 = "M4", MB5 = "M5",
 }
 
+-- The keybind list rows are RichText so ON/OFF can be coloured inline. A widget
+-- name containing &, < or > would otherwise be parsed as markup: Roblox renders
+-- the whole label as raw tags once the markup is malformed, so one player name
+-- with a bracket in it breaks the entire panel.
+function Util.EscapeRich(text)
+    local escaped = string.gsub(tostring(text), "&", "&amp;")
+    escaped = string.gsub(escaped, "<", "&lt;")
+    escaped = string.gsub(escaped, ">", "&gt;")
+    return escaped
+end
+
 function Util.KeyLabel(key)
     if not key or key == "" then return "-" end
     local mapped = KEY_LABELS[key]
@@ -1030,20 +1041,42 @@ function Library:_CreateKeybindList()
 
     self:_MakeDraggable(self.KeybindFrame, self.KeybindFrame)
 
-    -- Rebuilt only when the rendered contents actually change, keyed off a
-    -- signature string. Without that this churns a dozen Instances a frame.
+    local ROW_H, HEAD_H, W_MIN = 18, 24, 160
+
+    -- Two levels of throttling, both from the original:
+    --
+    --   * It polls at 0.15s rather than per frame. The contents change a few
+    --     times a second at most, and the poll itself allocates a table and a
+    --     signature string, which is not something to do at 144Hz.
+    --   * It rebuilds the rows only when the rendered result actually differs,
+    --     keyed off that signature. Without it, holding an aim key would destroy
+    --     and recreate every label on every poll.
+    local nextPoll = 0
+
     self:Watch(function()
         if not self.ShowKeybinds then
             if self.KeybindFrame.Visible then self.KeybindFrame.Visible = false end
             return
         end
 
+        local now = os.clock()
+        if now < nextPoll then return end
+        nextPoll = now + 0.15
+
         local rows, parts = {}, {}
         for _, picker in ipairs(self._keybinds) do
             if picker.Value and picker.Value ~= "" and picker.ShowInList then
                 local active = picker:GetState()
-                rows[#rows + 1] = { Text = picker.Text, Key = Util.KeyLabel(picker.Value), On = active }
-                parts[#parts + 1] = picker.Text .. "|" .. picker.Value .. "|" .. tostring(active)
+                -- "Enable Silent Aim" reads as "Silent Aim": the toggle's label
+                -- makes sense in the menu, but the prefix is noise in a list of
+                -- binds where everything is a feature.
+                local name = string.gsub(picker.Text, "^Enable ", "")
+                rows[#rows + 1] = {
+                    Text = name,
+                    Key  = Util.KeyLabel(picker.Value),
+                    On   = active,
+                }
+                parts[#parts + 1] = name .. "|" .. picker.Value .. "|" .. tostring(active)
             end
         end
 
@@ -1059,28 +1092,34 @@ function Library:_CreateKeybindList()
         local widest = 0
         if #rows == 0 then
             local label = self:Label(self.KeybindList, "No keybinds set", {
-                Color = Theme.TextDim, Size = UDim2.new(1, 0, 0, 18),
+                Color = Theme.TextDim, Size = UDim2.new(1, 0, 0, ROW_H),
             })
             label.LayoutOrder = 1
             widest = Util.TextWidth("No keybinds set", self.Font, self.FontSize)
         else
             for index, row in ipairs(rows) do
-                local plain = "[" .. row.Key .. "] | " .. row.Text .. ": " .. (row.On and "ON" or "OFF")
+                -- Measured on the plain form: GetTextSize would count the markup
+                -- characters and size the panel far too wide.
+                local plain = "[" .. row.Key .. "] | " .. row.Text .. ": "
+                    .. (row.On and "ON" or "OFF")
                 local state = row.On and '<font color="#22c55e">ON</font>'
                                      or  '<font color="#ef4444">OFF</font>'
+
                 local label = self:Label(self.KeybindList, "", {
-                    Size = UDim2.new(1, 0, 0, 18), Color = Color3.fromRGB(230, 230, 230),
+                    Size = UDim2.new(1, 0, 0, ROW_H), Color = Color3.fromRGB(230, 230, 230),
                 })
                 label.RichText = true
-                label.Text = "[" .. row.Key .. "] | " .. row.Text .. ": " .. state
+                label.Text = "[" .. Util.EscapeRich(row.Key) .. "] | "
+                    .. Util.EscapeRich(row.Text) .. ": " .. state
                 label.LayoutOrder = index
+
                 widest = math.max(widest, Util.TextWidth(plain, self.Font, self.FontSize))
             end
         end
 
         self.KeybindFrame.Size = UDim2.fromOffset(
-            math.max(160, widest + 20),
-            24 + math.max(#rows, 1) * 18 + 6
+            math.max(W_MIN, widest + 20),
+            HEAD_H + math.max(#rows, 1) * ROW_H + 6
         )
     end)
 end
@@ -2896,21 +2935,28 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
         self:_Repaint()
     end
 
-    -- GetState is the question the script actually asks: "should the feature this
-    -- bind guards be acting right now".
+    -- GetState is the question a feature loop actually asks: "should the thing
+    -- this bind guards be acting right now". It folds in the parent toggle, so a
+    -- bind on a switched-off feature reads OFF however the key is sitting -
+    -- matching the keybind list in Private.lua, which computes
+    --   enabled and (Type == "Always" or Active)
+    -- A HUD that claims ON while the feature is off is worse than no HUD.
     function picker:GetState()
-        if self.Value == "" then
-            -- No key bound: defer entirely to the parent toggle, so an unbound
-            -- picker never gates a feature off.
-            return self.Parent and self.Parent.Value or true
+        -- Written out rather than `self.Parent and self.Parent.Value or true`:
+        -- that idiom returns TRUE when the parent exists and is false, because
+        -- `false or true` is true. It is the classic Lua and/or trap and it had
+        -- every unbound picker on a disabled toggle reporting on.
+        local parentOn = true
+        if self.Parent then
+            parentOn = self.Parent.Value and true or false
         end
-        if self.Mode == "Always" then
-            return self.Parent and self.Parent.Value or true
-        end
-        if self.Mode == "Hold" then
-            return Util.IsKeyDown(self.Value)
-        end
-        return self.Active
+
+        -- No key bound: the bind gates nothing, so the toggle alone decides.
+        if self.Value == "" then return parentOn end
+
+        if self.Mode == "Always" then return parentOn end
+        if self.Mode == "Hold" then return parentOn and Util.IsKeyDown(self.Value) end
+        return parentOn and self.Active
     end
 
     function picker:_Fire()
@@ -3737,13 +3783,18 @@ function SaveManager:BuildConfigSection(tab, options)
         Callback = function(color) library:SetAccent(color) end,
     })
 
+    -- Defaults read the library's current state rather than a literal, so a
+    -- script that called SetKeybindListVisible(true) before building this page
+    -- does not get a toggle sitting at "off" next to a visible panel.
     right:AddToggle("MenuKeybindList", {
         Text = "Show keybind list",
+        Default = library.ShowKeybinds,
         Callback = function(value) library:SetKeybindListVisible(value) end,
     })
 
     right:AddToggle("MenuWatermark", {
-        Text = "Show watermark", Default = true,
+        Text = "Show watermark",
+        Default = (library.Watermark ~= nil) and library.Watermark.Visible or false,
         Callback = function(value) library:SetWatermarkVisible(value) end,
     })
 
