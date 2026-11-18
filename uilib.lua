@@ -642,9 +642,10 @@ function Library:Unload()
     self.Watermark, self.NotifyLayer = nil, nil
     self.Modal, self.PopupLayer, self.Window = nil, nil, nil
     self._keybindSignature = nil
-    -- The topbar's own "already built" flags, for the same reason: they gate
+    -- The topbar's own "already built" handles, for the same reason: they gate
     -- the rebuild, and the watcher they gate was dropped with _watchers.
-    self._topbarCells, self._topbarWatcher, self._topbarNext = nil, nil, nil
+    self.Topbar, self._topbar = nil, nil
+    self._topbarWatcher, self._topbarNext, self._fps = nil, nil, nil
 
     Anim.List, Scalar.List = {}, {}
     self.Toggles, self.Options = {}, {}
@@ -3217,55 +3218,243 @@ end
 ---------------------------------------------------------------------------------
 -- TOPBAR
 --
--- watermark.cpp's strip, live: "SYS [ROBLOX] | 142 FPS | 38 PING | 21:30:45".
--- The blocks are rebuilt only when a value actually changes, because rebuilding
--- four auto-sized frames every frame for a clock that ticks once a second is
--- most of a frame's UI budget spent on nothing.
+-- "SYS [PVP]  |  142 fps  |  38 ms  |  21:30:45", live.
+--
+-- This used to BE the watermark with live text poured into it, which is exactly
+-- why it looked like a row of detached stickers: watermark.cpp draws discrete
+-- blocks with gaps between them, because that is what the original menu wants
+-- from it. A HUD readout wants the opposite - ONE bar, fields divided by
+-- hairlines inside it, so it reads as a single instrument.
+--
+-- Four things carry most of the difference:
+--
+--   * Fixed-width number fields. The giveaway of a cheap readout is the bar
+--     twitching as "99 fps" becomes "100 fps" and everything to its right
+--     shifts along. Numbers are right-aligned in a fixed cell, units are
+--     left-aligned in theirs, so nothing moves - ever.
+--   * A value/unit hierarchy: big white number, small grey unit, rather than
+--     one run of 16px text giving "142" and "FPS" equal weight.
+--   * Colour only as information. The bar is monochrome while everything is
+--     fine, and FPS and ping go amber then red as they degrade - eased, not
+--     snapped. Nothing is coloured for decoration, which is what keeps this
+--     inside a black-and-white menu.
+--   * A top-lit gradient and a hairline edge, so a translucent strip over
+--     gameplay still has an edge to read against a bright sky.
+--
+-- It no longer touches self.Watermark at all; that API is left for anyone using
+-- it directly.
 ---------------------------------------------------------------------------------
+local TB_H      = 28
+local TB_PAD    = 11
+local TB_GAP    = 9
+local TB_NUM_W  = 32    -- fits "9999"; right-aligned
+local TB_UNIT_W = 22
+local TB_NUM_GAP = 3
+
+local TB_WARN = Color3.fromRGB(235, 180, 90)
+local TB_BAD  = Color3.fromRGB(235, 95, 95)
+
+local function tbFpsColor(value)
+    if value < 30 then return TB_BAD end
+    if value < 60 then return TB_WARN end
+    return Theme.TextActive
+end
+
+local function tbPingColor(value)
+    if value > 160 then return TB_BAD end
+    if value > 90 then return TB_WARN end
+    return Theme.TextActive
+end
+
+function Library:_CreateTopbar()
+    if self._topbar then return end
+
+    local bar = Util.New("Frame", {
+        Name = "Topbar", BackgroundColor3 = Theme.Dark14,
+        BackgroundTransparency = 0.12, BorderSizePixel = 0,
+        Position = UDim2.fromOffset(S(20), S(20)),
+        Size = UDim2.fromOffset(0, S(TB_H)),
+        AutomaticSize = Enum.AutomaticSize.X,
+        ZIndex = 4000, Active = true, Visible = false,
+        Parent = self.ScreenGui,
+    })
+    Util.Corner(bar, S(M.Rounding + 1))
+    Util.Stroke(bar, Theme.Dark34)
+    Util.Pad(bar, 0, 0, S(TB_PAD), S(TB_PAD))
+
+    -- Multiplies the bar's own Dark14, so the top stays Dark14 and the bottom
+    -- darkens. One gradient is the difference between a flat rectangle and
+    -- something that reads as a lit surface.
+    Util.New("UIGradient", {
+        Rotation = 90,
+        Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)),
+            ColorSequenceKeypoint.new(1, Color3.fromRGB(150, 150, 150)),
+        }),
+        Parent = bar,
+    })
+
+    Util.New("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        VerticalAlignment = Enum.VerticalAlignment.Center,
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Padding = UDim.new(0, S(TB_GAP)),
+        Parent = bar,
+    })
+
+    local order = 0
+    local function nextOrder()
+        order = order + 1
+        return order
+    end
+
+    -- 1px vertical hairline. Short of full height on purpose: a divider that
+    -- runs edge to edge cuts the bar into separate boxes again, which is the
+    -- thing this is getting away from.
+    local function divider()
+        local line = Util.New("Frame", {
+            Name = "Divider", BackgroundColor3 = Theme.Dark42, BorderSizePixel = 0,
+            Size = UDim2.fromOffset(1, S(12)),
+            LayoutOrder = nextOrder(), ZIndex = 2, Parent = bar,
+        })
+        return line
+    end
+
+    -----------------------------------------------------------------
+    -- Brand. The only auto-sized cell, and it is static after build, so the
+    -- bar's own automatic width never changes at runtime.
+    -----------------------------------------------------------------
+    local brand = Util.New("Frame", {
+        Name = "Brand", BackgroundTransparency = 1,
+        Size = UDim2.new(0, 0, 1, 0),
+        AutomaticSize = Enum.AutomaticSize.X,
+        LayoutOrder = nextOrder(), ZIndex = 2, Parent = bar,
+    })
+    Util.New("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        VerticalAlignment = Enum.VerticalAlignment.Center,
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Padding = UDim.new(0, S(6)),
+        Parent = brand,
+    })
+
+    local tick = Util.New("Frame", {
+        Name = "Tick", BorderSizePixel = 0,
+        Size = UDim2.fromOffset(S(2), S(12)),
+        LayoutOrder = 1, ZIndex = 3, Parent = brand,
+    })
+    Util.Corner(tick, S(1))
+    self:Accent(tick)
+
+    -- Trailing space trimmed: the consumer passes "SYS " because the old block
+    -- layout had no gap of its own, and the list provides one now.
+    local title = string.match(tostring(self.TopbarTitle or "SYS"), "^%s*(.-)%s*$")
+    local tag   = string.match(tostring(self.TopbarTag or ""), "^%s*(.-)%s*$")
+
+    local titleLabel = self:Label(brand, title, {
+        Color = Theme.TextActive, Size = 13, Weight = "SemiBold", Truncate = false,
+        Size2 = UDim2.fromOffset(0, S(16)), AutoSize = Enum.AutomaticSize.X, ZIndex = 3,
+    })
+    titleLabel.LayoutOrder = 2
+
+    if tag ~= "" then
+        local tagLabel = self:Label(brand, tag, {
+            Color = Theme.Accent, Size = 13, Weight = "SemiBold", Truncate = false,
+            Size2 = UDim2.fromOffset(0, S(16)), AutoSize = Enum.AutomaticSize.X, ZIndex = 3,
+        })
+        tagLabel.LayoutOrder = 3
+        self:Accent(tagLabel, "TextColor3")
+    end
+
+    -----------------------------------------------------------------
+    -- Metric cells. Absolutely positioned inside a fixed-width cell rather
+    -- than laid out, which is what makes the width immune to the digits.
+    -----------------------------------------------------------------
+    local function metric(unit)
+        divider()
+
+        local cell = Util.New("Frame", {
+            Name = unit, BackgroundTransparency = 1,
+            Size = UDim2.new(0, S(TB_NUM_W + TB_NUM_GAP + TB_UNIT_W), 1, 0),
+            LayoutOrder = nextOrder(), ZIndex = 2, Parent = bar,
+        })
+
+        local value = self:Label(cell, "0", {
+            Color = Theme.TextActive, Size = 13, Weight = "SemiBold", Truncate = false,
+            XAlign = Enum.TextXAlignment.Right,
+            Size2 = UDim2.new(0, S(TB_NUM_W), 1, 0), ZIndex = 3,
+        })
+
+        -- Nudged down a pixel: a 9px label centred against a 13px number sits
+        -- visibly high of its baseline.
+        self:Label(cell, unit, {
+            Color = Theme.TextInactive, Size = 9, Weight = "SemiBold", Truncate = false,
+            Position = UDim2.fromOffset(S(TB_NUM_W + TB_NUM_GAP), S(1)),
+            Size2 = UDim2.new(0, S(TB_UNIT_W), 1, 0), ZIndex = 3,
+        })
+
+        return value, Anim.track(value, "TextColor3", Theme.TextActive)
+    end
+
+    local fpsLabel,  fpsAnim  = metric("fps")
+    local pingLabel, pingAnim = metric("ms")
+
+    -----------------------------------------------------------------
+    -- Clock. The seconds go grey - it is the digit pair that changes every
+    -- tick, so dimming it stops the bar reading as something flickering.
+    -----------------------------------------------------------------
+    divider()
+
+    local clockCell = Util.New("Frame", {
+        Name = "Clock", BackgroundTransparency = 1,
+        Size = UDim2.new(0, S(58), 1, 0),
+        LayoutOrder = nextOrder(), ZIndex = 2, Parent = bar,
+    })
+
+    local clockLabel = self:Label(clockCell, "00:00", {
+        Color = Theme.TextActive, Size = 12, Weight = "Medium", Truncate = false,
+        XAlign = Enum.TextXAlignment.Right,
+        Size2 = UDim2.new(0, S(36), 1, 0), ZIndex = 3,
+    })
+
+    local secsLabel = self:Label(clockCell, ":00", {
+        Color = Theme.TextInactive, Size = 12, Weight = "Medium", Truncate = false,
+        Position = UDim2.fromOffset(S(36), 0),
+        Size2 = UDim2.new(0, S(22), 1, 0), ZIndex = 3,
+    })
+
+    self:Draggable(bar, { bar })
+
+    self.Topbar = bar
+    self._topbar = {
+        Fps = fpsLabel, FpsAnim = fpsAnim,
+        Ping = pingLabel, PingAnim = pingAnim,
+        Clock = clockLabel, Secs = secsLabel,
+    }
+end
+
 function Library:SetTopbarVisible(visible)
     self.TopbarEnabled = visible and true or false
 
     if not self.TopbarEnabled then
-        if self.Watermark then self.Watermark.Visible = false end
+        if self.Topbar then self.Topbar.Visible = false end
         return
     end
 
     self:_CreateRoot()
-
-    -- Built once. The blocks are auto-sized frames, and tearing four of them
-    -- down and back up twice a second to move a clock is a lot of layout work
-    -- for a string change; the labels are kept and only their text is written.
-    if not self._topbarCells then
-        self:SetWatermarkBlocks({
-            { self.TopbarTitle or "SYS ", self.TopbarTag or "[ROBLOX]" },
-            { "0 ", "FPS" },
-            { "0 ", "PING" },
-            { "00:00:00", "" },
-        })
-
-        self._topbarCells = {}
-        for _, cell in ipairs(self.Watermark:GetChildren()) do
-            if cell:IsA("Frame") then
-                local main
-                for _, child in ipairs(cell:GetChildren()) do
-                    if child:IsA("TextLabel") and child.LayoutOrder == 1 then main = child end
-                end
-                if main then
-                    self._topbarCells[cell.LayoutOrder] = main
-                end
-            end
-        end
-    end
-
-    self.Watermark.Visible = true
+    self:_CreateTopbar()
+    self.Topbar.Visible = true
 
     if self._topbarWatcher then return end
 
     self._topbarWatcher = self:Watch(function(_, dt)
-        if not self.TopbarEnabled or not self.Watermark then return end
+        local cells = self._topbar
+        if not self.TopbarEnabled or not cells then return end
 
         -- Smoothed, or the readout flickers through a 20-frame spread every
-        -- time it is sampled.
+        -- time it is sampled. Accumulated every frame even though the text is
+        -- only written twice a second, so the average covers the whole window
+        -- rather than whichever frame happened to land on the sample.
         if dt and dt > 0 then
             local instant = 1 / dt
             self._fps = self._fps and (self._fps + (instant - self._fps) * 0.1) or instant
@@ -3281,10 +3470,15 @@ function Library:SetTopbarVisible(visible)
                 .ServerStatsItem["Data Ping"]:GetValue() + 0.5)
         end)
 
-        local cells = self._topbarCells
-        if cells[2] then cells[2].Text = math.floor((self._fps or 0) + 0.5) .. " " end
-        if cells[3] then cells[3].Text = ping .. " " end
-        if cells[4] then cells[4].Text = os.date("%H:%M:%S") end
+        local fps = math.floor((self._fps or 0) + 0.5)
+        cells.Fps.Text = tostring(fps)
+        Anim.set(cells.FpsAnim, tbFpsColor(fps))
+
+        cells.Ping.Text = tostring(ping)
+        Anim.set(cells.PingAnim, tbPingColor(ping))
+
+        cells.Clock.Text = os.date("%H:%M")
+        cells.Secs.Text  = os.date(":%S")
     end)
 end
 
@@ -3642,6 +3836,84 @@ end
 local SaveManager = {}
 SaveManager.__index = SaveManager
 
+-- A config name becomes a filename, so it is checked rather than trusted.
+-- Unchecked it could do two things: a name containing a slash or ".." writes
+-- outside the configs folder (and then never shows up in List, because the
+-- pattern there only matches one path segment), and a name containing a colon
+-- or a quote makes writefile throw on Windows - which the fs shim swallows into
+-- a bare "write failed" with nothing saying why.
+local NAME_MAX = 40
+
+local function cleanName(name)
+    if type(name) ~= "string" then return nil, "no config name" end
+
+    -- Trimmed, not stripped. See GetAutoload for what stripping cost.
+    name = string.match(name, "^%s*(.-)%s*$")
+    if name == "" then return nil, "no config name" end
+    if #name > NAME_MAX then return nil, "name is longer than " .. NAME_MAX end
+    if not string.match(name, "^[%w%-_%. ]+$") then
+        return nil, "use only letters, numbers, spaces, - _ ."
+    end
+
+    -- "." and ".." are directory entries, and Windows drops a trailing dot -
+    -- so "pvp." and "pvp" are the same file and would collide invisibly.
+    if string.match(name, "^%.+$") or string.match(name, "%.$") then
+        return nil, "invalid name"
+    end
+
+    return name
+end
+
+local function hasValue(list, value)
+    if value == nil then return false end
+    for _, item in ipairs(list or {}) do
+        if item == value then return true end
+    end
+    return false
+end
+
+-- One option to its stored form. Returns nil for a control with nothing worth
+-- storing, and is called under pcall so a control in a broken state costs its
+-- own setting rather than the whole save.
+local function encodeOption(option)
+    local kind = option.Type
+
+    if kind == "Slider" then
+        return { type = "Slider", value = option.Value }
+
+    elseif kind == "Dropdown" then
+        if option.Multi then
+            local selected = {}
+            for value, on in pairs(option.Value or {}) do
+                if on then selected[#selected + 1] = value end
+            end
+            table.sort(selected, function(a, b) return tostring(a) < tostring(b) end)
+            return { type = "MultiDropdown", value = selected }
+        end
+        return { type = "Dropdown", value = option.Value }
+
+    elseif kind == "Listbox" then
+        return { type = "Listbox", value = option.Value }
+
+    elseif kind == "Input" then
+        return { type = "Input", value = option.Value }
+
+    elseif kind == "KeyPicker" then
+        return { type = "KeyPicker", key = option.Value, mode = option.Mode }
+
+    elseif kind == "ColorPicker" then
+        return {
+            type = "ColorPicker",
+            r = math.floor(option.Value.R * 255 + 0.5),
+            g = math.floor(option.Value.G * 255 + 0.5),
+            b = math.floor(option.Value.B * 255 + 0.5),
+            a = option.Transparency,
+        }
+    end
+
+    return nil
+end
+
 function Library:CreateSaveManager(config)
     config = config or {}
     local folder = config.Folder or "uilib"
@@ -3668,103 +3940,192 @@ end
 function SaveManager:ConfigPath(name) return self.Folder .. "/configs/" .. name .. ".json" end
 function SaveManager:AutoloadPath() return self.Folder .. "/settings/autoload.txt" end
 
+function SaveManager:Exists(name)
+    local clean = cleanName(name)
+    return clean ~= nil and fs.IsFile(self:ConfigPath(clean))
+end
+
 function SaveManager:Serialize()
     local data = { Toggles = {}, Options = {} }
     local library = self.Library
 
+    -- String indexes only. JSONEncode refuses a table with both string and
+    -- number keys, so one numerically-indexed control would fail the whole save
+    -- with nothing but "encode failed" to go on.
     for index, toggle in pairs(library.Toggles) do
-        if not self.Ignore[index] then data.Toggles[index] = toggle.Value end
+        if type(index) == "string" and not self.Ignore[index] then
+            data.Toggles[index] = toggle.Value and true or false
+        end
     end
 
     for index, option in pairs(library.Options) do
-        if not self.Ignore[index] then
-            if option.Type == "Slider" then
-                data.Options[index] = { type = "Slider", value = option.Value }
-            elseif option.Type == "Dropdown" then
-                if option.Multi then
-                    local selected = {}
-                    for value, on in pairs(option.Value or {}) do
-                        if on then selected[#selected + 1] = value end
-                    end
-                    data.Options[index] = { type = "MultiDropdown", value = selected }
-                else
-                    data.Options[index] = { type = "Dropdown", value = option.Value }
-                end
-            elseif option.Type == "Listbox" then
-                data.Options[index] = { type = "Listbox", value = option.Value }
-            elseif option.Type == "Input" then
-                data.Options[index] = { type = "Input", value = option.Value }
-            elseif option.Type == "KeyPicker" then
-                data.Options[index] = { type = "KeyPicker", key = option.Value, mode = option.Mode }
-            elseif option.Type == "ColorPicker" then
-                data.Options[index] = {
-                    type = "ColorPicker",
-                    r = math.floor(option.Value.R * 255 + 0.5),
-                    g = math.floor(option.Value.G * 255 + 0.5),
-                    b = math.floor(option.Value.B * 255 + 0.5),
-                    a = option.Transparency,
-                }
-            end
+        if type(index) == "string" and not self.Ignore[index] then
+            local ok, record = pcall(encodeOption, option)
+            if ok and record then data.Options[index] = record end
         end
     end
 
     return data
 end
 
+-- Restores one option. Split out so each one runs under its own pcall in
+-- Deserialize, and so the per-type validation has room to be readable.
+--
+-- Everything here is defensive about the stored value, because a config file is
+-- just text on disk: it can predate a control, outlive one, be hand-edited, or
+-- be truncated by a crash mid-write.
+function SaveManager:_Restore(option, record)
+    local kind = option.Type
+
+    if kind == "ColorPicker" then
+        local function channel(v) return math.clamp(tonumber(v) or 255, 0, 255) end
+        local alpha = tonumber(record.a)
+        option:SetValue(
+            Color3.fromRGB(channel(record.r), channel(record.g), channel(record.b)),
+            alpha and math.clamp(alpha, 0, 1) or nil)
+
+    elseif kind == "KeyPicker" then
+        -- A mode the library does not know would leave the picker in a state no
+        -- code path handles, so anything unrecognised becomes Toggle.
+        local mode = record.mode
+        if mode ~= "Always" and mode ~= "Toggle" and mode ~= "Hold" then
+            mode = "Toggle"
+        end
+        option:SetMode(mode, true)
+        option:SetValue(type(record.key) == "string" and record.key or "")
+
+    elseif kind == "Slider" then
+        -- The one that actually threw: SetValue runs Util.Clamp, which compares
+        -- the value against Min, and a missing `value` made that nil < number.
+        local value = tonumber(record.value)
+        if value then option:SetValue(value) end
+
+    elseif kind == "Dropdown" and option.Multi then
+        local wanted = {}
+        if type(record.value) == "table" then
+            for _, item in ipairs(record.value) do
+                if hasValue(option.Values, item) then wanted[#wanted + 1] = item end
+            end
+        end
+        option:SetValue(wanted)
+
+    elseif kind == "Dropdown" or kind == "Listbox" then
+        -- A stored value that is no longer one of the choices would be shown as
+        -- selected and handed to the callback, which has no branch for it.
+        if hasValue(option.Values, record.value) then
+            option:SetValue(record.value)
+        end
+
+    elseif kind == "Input" then
+        if record.value ~= nil then option:SetValue(tostring(record.value)) end
+    end
+end
+
+-- Returns ok, applied, failed - or false plus a message.
 function SaveManager:Deserialize(data)
     if type(data) ~= "table" then return false, "malformed config" end
+
     local library = self.Library
 
-    for index, value in pairs(data.Toggles or {}) do
+    -- Type-checked rather than `or {}`: a truncated or hand-edited file can
+    -- leave these as a string or a number, and pairs() on one of those throws.
+    local toggles = type(data.Toggles) == "table" and data.Toggles or {}
+    local options = type(data.Options) == "table" and data.Options or {}
+
+    local applied, failed = 0, 0
+
+    -- Every set is isolated. A control's callback runs real work in the host
+    -- script - spawning loops, touching the workspace - and one that throws
+    -- used to abort the rest of the load, leaving the menu half in the config
+    -- and half not with nothing saying which half.
+    local function apply(fn)
+        if pcall(fn) then applied = applied + 1 else failed = failed + 1 end
+    end
+
+    for index, value in pairs(toggles) do
         local toggle = library.Toggles[index]
         if toggle and not self.Ignore[index] then
-            toggle:SetValue(value and true or false)
+            apply(function() toggle:SetValue(value and true or false) end)
         end
     end
 
-    for index, record in pairs(data.Options or {}) do
+    for index, record in pairs(options) do
         local option = library.Options[index]
         if option and not self.Ignore[index] and type(record) == "table" then
-            if option.Type == "ColorPicker" then
-                option:SetValue(
-                    Color3.fromRGB(record.r or 255, record.g or 255, record.b or 255),
-                    record.a)
-            elseif option.Type == "KeyPicker" then
-                option:SetMode(record.mode or "Toggle", true)
-                option:SetValue(record.key or "")
-            elseif option.Type == "Dropdown" and option.Multi then
-                option:SetValue(record.value or {})
+            -- The stored type has to still match the live control. Dispatching
+            -- on the live type alone means a setting that changed from a
+            -- dropdown to a slider between versions gets handed a string to do
+            -- arithmetic on.
+            local want = option.Type
+            if want == "Dropdown" and option.Multi then want = "MultiDropdown" end
+
+            if record.type == nil or record.type == want then
+                apply(function() self:_Restore(option, record) end)
             else
-                option:SetValue(record.value)
+                failed = failed + 1
             end
         end
     end
 
-    return true
+    if applied == 0 and failed > 0 then
+        return false, "nothing in this config could be applied"
+    end
+    return true, applied, failed
 end
 
-function SaveManager:Save(name)
-    if not name or name == "" then return false, "no config name" end
+-- Creating. Refuses to clobber, because that is what Overwrite is for: Save
+-- used to write unconditionally, so hitting it while a config you had selected
+-- was still in the name box silently destroyed that config.
+function SaveManager:Save(name, overwrite)
+    local clean, err = cleanName(name)
+    if not clean then return false, err end
+
+    if not overwrite and fs.IsFile(self:ConfigPath(clean)) then
+        return false, "'" .. clean .. "' already exists"
+    end
+
     local ok, encoded = pcall(function() return HttpService:JSONEncode(self:Serialize()) end)
-    if not ok then return false, "encode failed" end
-    if not fs.Write(self:ConfigPath(name), encoded) then return false, "write failed" end
-    return true
+    if not ok then return false, "could not encode settings" end
+    if not fs.Write(self:ConfigPath(clean), encoded) then return false, "write failed" end
+
+    return true, clean
+end
+
+function SaveManager:Overwrite(name)
+    local clean, err = cleanName(name)
+    if not clean then return false, err end
+    if not fs.IsFile(self:ConfigPath(clean)) then
+        return false, "'" .. clean .. "' does not exist"
+    end
+    return self:Save(clean, true)
 end
 
 function SaveManager:Load(name)
-    if not name or name == "" then return false, "no config name" end
-    local contents = fs.Read(self:ConfigPath(name))
-    if not contents then return false, "config does not exist" end
+    local clean, err = cleanName(name)
+    if not clean then return false, err end
+
+    local contents = fs.Read(self:ConfigPath(clean))
+    if not contents then return false, "'" .. clean .. "' does not exist" end
+
     local ok, decoded = pcall(function() return HttpService:JSONDecode(contents) end)
-    if not ok then return false, "decode failed" end
+    if not ok then return false, "'" .. clean .. "' is not valid JSON" end
+
     return self:Deserialize(decoded)
 end
 
 function SaveManager:Delete(name)
-    if not name or name == "" then return false, "no config name" end
-    if not fs.IsFile(self:ConfigPath(name)) then return false, "config does not exist" end
-    fs.Delete(self:ConfigPath(name))
-    return true
+    local clean, err = cleanName(name)
+    if not clean then return false, err end
+    if not fs.IsFile(self:ConfigPath(clean)) then
+        return false, "'" .. clean .. "' does not exist"
+    end
+    if not fs.Delete(self:ConfigPath(clean)) then return false, "delete failed" end
+
+    -- An autoload still pointing at the deleted config would fail on every
+    -- future launch with a notification the user cannot act on.
+    if self:GetAutoload() == clean then self:SetAutoload(nil) end
+
+    return true, clean
 end
 
 function SaveManager:List()
@@ -3778,29 +4139,48 @@ function SaveManager:List()
 end
 
 function SaveManager:SetAutoload(name)
-    if name and name ~= "" then
-        fs.Write(self:AutoloadPath(), name)
-    else
-        fs.Delete(self:AutoloadPath())
+    if name == nil or name == "" then
+        if fs.IsFile(self:AutoloadPath()) then fs.Delete(self:AutoloadPath()) end
+        return true
     end
+
+    local clean, err = cleanName(name)
+    if not clean then return false, err end
+    -- Pointing autoload at a config that is not there just defers the failure
+    -- to the next launch, where there is no UI to correct it from.
+    if not fs.IsFile(self:ConfigPath(clean)) then
+        return false, "'" .. clean .. "' does not exist"
+    end
+    if not fs.Write(self:AutoloadPath(), clean) then return false, "write failed" end
+
+    return true, clean
 end
 
 function SaveManager:GetAutoload()
     local contents = fs.Read(self:AutoloadPath())
     if not contents then return nil end
-    local name = string.gsub(contents, "%s", "")
-    return name ~= "" and name or nil
+
+    -- Trimmed, not stripped. gsub("%s", "") removed spaces from the middle too,
+    -- so a config called "my config" was written correctly and then read back
+    -- as "myconfig" - which autoloaded nothing, every launch, forever.
+    local name = string.match(contents, "^%s*(.-)%s*$")
+    return (name ~= "" and name) or nil
 end
 
 function SaveManager:LoadAutoloadConfig()
     local name = self:GetAutoload()
     if not name then return false end
-    local ok, err = self:Load(name)
+
+    local ok, applied, failed = self:Load(name)
     if ok then
-        self.Library:Notify("Loaded config " .. name, 3)
+        local note = "Loaded " .. name .. " (" .. tostring(applied) .. " settings)"
+        if (failed or 0) > 0 then note = note .. ", " .. tostring(failed) .. " skipped" end
+        self.Library:Notify(note, 3)
     else
-        self.Library:Notify("Autoload failed: " .. tostring(err), 5)
+        -- `applied` carries the message on failure.
+        self.Library:Notify("Autoload failed: " .. tostring(applied), 5)
     end
+
     if self._autoloadLabel then self._autoloadLabel:SetText("Autoload: " .. name) end
     return ok
 end
@@ -3815,51 +4195,84 @@ function SaveManager:BuildConfigSection(tab, options)
     local list = left:AddListbox("ConfigList", { Values = self:List(), Rows = 5 })
     local nameBox = left:AddInput("ConfigName", {
         Text = "Config name", Placeholder = "Config name", Finished = true,
+        MaxLength = NAME_MAX,
     })
 
+    -- Ignored here rather than with the Menu* indexes at the bottom, which sit
+    -- after the NoMenuSection early return: a caller passing that option got a
+    -- config that stored its own name box and list selection, and then restored
+    -- them on load - including a selection naming a config that no longer
+    -- existed.
+    self:SetIgnoreIndexes({ "ConfigList", "ConfigName" })
+
+    -- The name box is the single source of truth for which config every button
+    -- acts on, and the list writes into it. Taking the name from `list.Value or
+    -- nameBox.Value` instead meant that selecting a config and then typing a
+    -- new name still acted on the selected one, because the list selection
+    -- never cleared.
     list:OnChanged(function(value)
         if value then nameBox:SetValueSilent(value) end
     end)
 
-    local function refresh() list:SetValues(self:List(), true) end
+    -- keep = false, so a config that no longer exists stops being the list's
+    -- selection. With keep = true a deleted config stayed selected, and
+    -- everything pointed at it afterwards reported "does not exist".
+    local function refresh(select)
+        list:SetValues(self:List(), false)
+        if select then list:SetValueSilent(select) end
+    end
 
-    left:AddButton({ Text = "Save", Func = function()
-        local ok, err = self:Save(nameBox.Value)
-        if ok then
-            refresh()
-            library:Notify("Config saved", 3)
-        else
-            library:Notify("Save failed: " .. tostring(err), 5)
-        end
+    local function say(ok, detail, good)
+        library:Notify(ok and good or tostring(detail), ok and 3 or 5)
+    end
+
+    left:AddButton({ Text = "Create", Func = function()
+        local ok, detail = self:Save(nameBox.Value)
+        if ok then refresh(detail) end
+        say(ok, detail, "Created " .. tostring(detail))
     end })
 
     left:AddButton({ Text = "Load", Func = function()
-        local ok, err = self:Load(list.Value or nameBox.Value)
-        library:Notify(ok and "Config loaded" or ("Load failed: " .. tostring(err)), ok and 3 or 5)
+        local ok, applied, failed = self:Load(nameBox.Value)
+        if not ok then
+            library:Notify(tostring(applied), 5)
+            return
+        end
+        local note = "Loaded " .. tostring(applied) .. " settings"
+        if (failed or 0) > 0 then note = note .. ", " .. tostring(failed) .. " skipped" end
+        library:Notify(note, 3)
+    end })
+
+    -- Confirmed, because it destroys the stored config and there is no undo.
+    left:AddButton({ Text = "Overwrite", Confirm = true, Func = function()
+        local ok, detail = self:Overwrite(nameBox.Value)
+        if ok then refresh(detail) end
+        say(ok, detail, "Overwrote " .. tostring(detail))
     end })
 
     left:AddButton({ Text = "Delete", Confirm = true, Func = function()
-        local ok, err = self:Delete(list.Value or nameBox.Value)
-        if ok then refresh() end
-        library:Notify(ok and "Config deleted" or ("Delete failed: " .. tostring(err)), ok and 3 or 5)
+        local ok, detail = self:Delete(nameBox.Value)
+        if ok then
+            refresh()
+            nameBox:SetValueSilent("")
+            if self._autoloadLabel then
+                self._autoloadLabel:SetText("Autoload: " .. (self:GetAutoload() or "none"))
+            end
+        end
+        say(ok, detail, "Deleted " .. tostring(detail))
     end })
 
-    left:AddButton({ Text = "Refresh", Func = function()
-        refresh()
+    left:AddButton({ Text = "Refresh list", Func = function()
+        refresh(nameBox.Value ~= "" and nameBox.Value or nil)
         library:Notify("Config list refreshed", 2)
     end })
 
     self._autoloadLabel = left:AddLabel("Autoload: none")
 
     left:AddButton({ Text = "Set autoload", Func = function()
-        local name = list.Value or nameBox.Value
-        if not name or name == "" then
-            library:Notify("Select a config first", 3)
-            return
-        end
-        self:SetAutoload(name)
-        self._autoloadLabel:SetText("Autoload: " .. name)
-        library:Notify("Autoload set", 3)
+        local ok, detail = self:SetAutoload(nameBox.Value)
+        if ok then self._autoloadLabel:SetText("Autoload: " .. tostring(detail)) end
+        say(ok, detail, "Autoload set to " .. tostring(detail))
     end })
 
     left:AddButton({ Text = "Clear autoload", Func = function()
@@ -3913,8 +4326,7 @@ function SaveManager:BuildConfigSection(tab, options)
     end })
 
     self:SetIgnoreIndexes({
-        "MenuKey", "MenuAccent", "MenuKeybindList", "MenuTopbar",
-        "MenuAnimSpeed", "ConfigList", "ConfigName",
+        "MenuKey", "MenuAccent", "MenuKeybindList", "MenuTopbar", "MenuAnimSpeed",
     })
 
     return self
