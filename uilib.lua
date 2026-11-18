@@ -538,6 +538,25 @@ local function S(value)
 end
 Library.S = S
 
+-- CanvasGroup renders its subtree to a texture and exposes a single
+-- transparency for all of it, which is the only way to fade a whole panel -
+-- text, strokes, borders and all - without walking every descendant and
+-- animating it separately. It is not on every client, so where it is missing
+-- the same surfaces are plain Frames and the transitions degrade to an instant
+-- swap rather than breaking.
+Library.CanFade = (function()
+    local ok, inst = pcall(Instance.new, "CanvasGroup")
+    if ok and inst then
+        inst:Destroy()
+        return true
+    end
+    return false
+end)()
+
+function Library:Surface(props, children)
+    return Util.New(self.CanFade and "CanvasGroup" or "Frame", props, children)
+end
+
 function Library:Connect(signal, fn)
     local conn = signal:Connect(fn)
     self._connections[#self._connections + 1] = conn
@@ -870,7 +889,10 @@ function Library:CreateWindow(config)
     local gap  = S(M.TitlebarSpacing)
     local wr   = S(M.Rounding + 1)   -- set_style: WindowRounding = rounding + 1
 
-    local root = Util.New("Frame", {
+    -- A CanvasGroup so the whole menu can fade as one surface on open and
+    -- close. Popups live in their own layer outside it, so a dropdown is not
+    -- clipped by the group's texture.
+    local root = self:Surface({
         Name = "Window", BackgroundTransparency = 1,
         AnchorPoint = config.Center == false and Vector2.new() or Vector2.new(0.5, 0.5),
         Position = config.Center == false
@@ -1025,12 +1047,33 @@ function Library:Toggle(state)
     if state == nil then state = not self.Open end
     self.Open = state and true or false
 
-    self.Window.Root.Visible = self.Open
+    local root = self.Window.Root
     if self.Modal then self.Modal.Modal = self.Open end
+
     if not self.Open then
         self:CloseAllPopups()
         self:_StopCapture()
     end
+
+    if not self.CanFade then
+        root.Visible = self.Open
+        return
+    end
+
+    -- Shown immediately on the way in so the first frame of the fade has
+    -- something to draw; hidden on the way out only once the fade has run,
+    -- which the setter below handles.
+    if self.Open then root.Visible = true end
+
+    if not self._openFade then
+        self._openFade = Scalar.track(0, function(value)
+            root.GroupTransparency = 1 - value
+            if value <= 0.02 and not self.Open then root.Visible = false end
+        end, M.AnimSpeed * 1.5)
+        root.GroupTransparency = 1
+    end
+
+    self._openFade.Target = self.Open and 1 or 0
 end
 
 ---------------------------------------------------------------------------------
@@ -1089,9 +1132,18 @@ function Window:AddTab(name, _icon)
     -- Page: two columns inside one scrolling region, exactly as
     -- gui.cpp does with begin_group / sameline / begin_group.
     -----------------------------------------------------------------
-    tab.Page = Util.New("ScrollingFrame", {
-        Name = "Page" .. index, BackgroundTransparency = 1, BorderSizePixel = 0,
+    -- The page lives inside a group so the whole thing - cards, rules, text -
+    -- fades as one surface on a tab change. The ScrollingFrame cannot do that
+    -- itself: fading it would mean animating every descendant.
+    tab.Wrap = library:Surface({
+        Name = "Page" .. index, BackgroundTransparency = 1,
         Size = UDim2.fromScale(1, 1), Visible = false,
+        Parent = self.ContentFrame,
+    })
+
+    tab.Page = Util.New("ScrollingFrame", {
+        Name = "Scroll", BackgroundTransparency = 1, BorderSizePixel = 0,
+        Size = UDim2.fromScale(1, 1),
         CanvasSize = UDim2.new(),
         AutomaticCanvasSize = Enum.AutomaticSize.Y,
         ScrollBarThickness = S(M.ScrollW),
@@ -1099,9 +1151,19 @@ function Window:AddTab(name, _icon)
         ScrollingDirection = Enum.ScrollingDirection.Y,
         ElasticBehavior = Enum.ElasticBehavior.Never,
         VerticalScrollBarInset = Enum.ScrollBarInset.None,
-        Parent = self.ContentFrame,
+        Parent = tab.Wrap,
     })
     library:Accent(tab.Page, "ScrollBarImageColor3")
+
+    -- Fade and a short rise on entry. Driven by the same Scalar easing as every
+    -- other animation in the library, so the tab change shares a curve with the
+    -- toggles and sliders rather than being a tween with its own feel.
+    tab.Fade = Scalar.track(0, function(value)
+        if library.CanFade then
+            tab.Wrap.GroupTransparency = 1 - value
+        end
+        tab.Wrap.Position = UDim2.fromOffset(0, math.floor((1 - value) * S(10)))
+    end, M.AnimSpeed * 1.3)
     Util.Pad(tab.Page, S(M.ContentPad), S(M.ContentPad), S(M.ContentPad), S(M.ContentPad))
     Util.List(tab.Page, S(M.ContentSpacing), Enum.FillDirection.Horizontal)
 
@@ -1137,8 +1199,10 @@ function Window:AddTab(name, _icon)
     end)
 
     library:Watch(function()
+        -- Visibility moved to the wrapper when the page gained its fade group;
+        -- the ScrollingFrame itself is now always Visible inside it.
         if not tab.Page.Parent then return false end
-        if not tab.Page.Visible then return end
+        if not tab.Wrap.Visible then return end
         local scrolls = tab.Page.AbsoluteCanvasSize.Y > tab.Page.AbsoluteWindowSize.Y
         tab.WidthAnim.Target = columnWidth(scrolls)
         self.ScrollTrack.Visible = scrolls
@@ -1187,15 +1251,22 @@ function Window:SetActiveTab(tab)
     local previous = self.ActiveTab
     self.ActiveTab = tab
 
-    -- gui.cpp cross-fades: alpha runs to 0 on the outgoing page, the page is
-    -- swapped at the bottom of the fade, then alpha runs back to 1. There is no
-    -- slide.
     if previous then
-        previous.Page.Visible = false
+        previous.Wrap.Visible = false
         previous:_Repaint()
     end
-    tab.Page.Visible = true
     tab:_Repaint()
+
+    -- The outgoing page is cut rather than cross-faded. Both pages occupy the
+    -- same rectangle, so fading them through each other shows two sets of cards
+    -- overlapping at half opacity for the duration - which reads as a glitch,
+    -- not a transition. Cutting the old one and lifting the new one in is what
+    -- actually looks deliberate.
+    tab.Wrap.Visible = true
+    tab.Fade.Value = 0
+    tab.Fade.Target = 1
+    if library.CanFade then tab.Wrap.GroupTransparency = 1 end
+    tab.Wrap.Position = UDim2.fromOffset(0, S(10))
 end
 
 ---------------------------------------------------------------------------------
@@ -1900,16 +1971,36 @@ function Groupbox:AddButton(options, func)
         ZIndex = 3,
     })
     local textAnim = Anim.track(label, "TextColor3", Theme.TextInactive)
+    local fillAnim = Anim.track(button, "BackgroundColor3", Theme.Dark33)
 
-    local armed, hovered = false, false
+    local armed, hovered, held = false, false, false
+
+    -- The fill moves as well as the text. Text-only feedback on a button the
+    -- size of this one is easy to miss, and a press that does not visibly
+    -- depress reads as a click that did not land.
+    local function repaint()
+        Anim.set(textAnim, (hovered or held) and Theme.TextActive or Theme.TextInactive)
+        Anim.set(fillAnim, held and Theme.Dark27
+            or (hovered and Theme.Dark37 or Theme.Dark33))
+    end
 
     library:Watch(function(point)
         if not row.Parent then return false end
         local over = Util.PointInside(button, point)
         if over ~= hovered then
             hovered = over
-            Anim.set(textAnim, over and Theme.TextActive or Theme.TextInactive)
+            if not over then held = false end
+            repaint()
         end
+    end)
+
+    library:Connect(hit.MouseButton1Down, function()
+        held = true
+        repaint()
+    end)
+    library:Connect(hit.MouseButton1Up, function()
+        held = false
+        repaint()
     end)
 
     library:Connect(hit.MouseButton1Click, function()
