@@ -285,6 +285,45 @@ function Util.List(parent, gap, direction, align)
     })
 end
 
+-- Roblox has no box-shadow, and the usual workaround - a blurred PNG scaled to
+-- fit - needs an asset and distorts on non-square boxes. Stacked translucent
+-- rects do not: each layer is one step wider and one step more transparent than
+-- the last, which approximates a falloff closely enough at this scale.
+--
+-- The layers go OUTSIDE the host's bounds, so the host must not clip and must
+-- not AutomaticSize (it would measure the shadow and grow forever, which grows
+-- the shadow). Give it a plain fixed-size host frame and size that to the box
+-- being shadowed.
+--
+-- Takes pixels, not design units: this lives above S() so it cannot scale for
+-- the caller.
+function Util.Shadow(host, radius, layers, reach)
+    layers = layers or 5
+    reach  = reach or 2
+    local out = {}
+    for depth = 1, layers do
+        local spread = depth * reach
+        local layer = Util.New("Frame", {
+            Name = "Shadow" .. depth,
+            BackgroundColor3 = Theme.Black,
+            -- 0.60 at the core out to ~0.90 at the edge. Past that it stops
+            -- reading as a shadow and starts reading as a grey border.
+            BackgroundTransparency = 0.6 + depth * 0.065,
+            BorderSizePixel = 0,
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            -- Pushed down by a third of its spread so the light reads as
+            -- coming from above rather than from dead centre.
+            Position = UDim2.new(0.5, 0, 0.5, math.floor(spread * 0.4)),
+            Size = UDim2.new(1, spread * 2, 1, spread * 2),
+            ZIndex = -depth,
+            Parent = host,
+        })
+        Util.Corner(layer, (radius or M.Rounding) + spread)
+        out[depth] = layer
+    end
+    return out
+end
+
 function Util.Clamp(v, lo, hi)
     if v < lo then return lo end
     if v > hi then return hi end
@@ -593,6 +632,19 @@ function Library:Unload()
         pcall(function() self.ScreenGui:Destroy() end)
         self.ScreenGui = nil
     end
+
+    -- Everything below the ScreenGui is gone now, so the handles to it have to
+    -- go too: each of the _Create* builders returns early when its handle is
+    -- set, and a destroyed Instance is still truthy. Without this, a second
+    -- load on the same Library table would silently come up with no watermark,
+    -- no keybind list and no notifications.
+    self.KeybindFrame, self.KeybindRows = nil, nil
+    self.Watermark, self.NotifyLayer = nil, nil
+    self.Modal, self.PopupLayer, self.Window = nil, nil, nil
+    self._keybindSignature = nil
+    -- The topbar's own "already built" flags, for the same reason: they gate
+    -- the rebuild, and the watcher they gate was dropped with _watchers.
+    self._topbarCells, self._topbarWatcher, self._topbarNext = nil, nil, nil
 
     Anim.List, Scalar.List = {}, {}
     self.Toggles, self.Options = {}, {}
@@ -2423,69 +2475,161 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
     -- The cog used to arm key capture directly, with the only feedback being a
     -- 12px icon changing colour - which reads as the button doing nothing, and
     -- gave no way at all to reach the mode. elements->hotkey_window in the
-    -- original is a 175x105 popup, so this is that: the bind on top, the three
-    -- modes under it.
+    -- original is a 175x105 popup, so this is that, with three things the first
+    -- pass got wrong:
+    --
+    --   * It never said WHICH bind you were editing. Open two cogs in a row and
+    --     the panel is identical both times. The feature name is now the panel's
+    --     header, which is also what lets the rest of the chrome go away: once
+    --     the title says "Silent Aim" the eyebrow reading "KEYBIND" is noise,
+    --     and so is the one reading "MODE" above three buttons labelled Always,
+    --     Toggle and Hold.
+    --   * The three modes were three separate buttons that each lit up on their
+    --     own, so the control read as three things rather than one choice. It is
+    --     a segmented control now - one track, one selection pill that SLIDES
+    --     between the cells, which is the thing that makes a choice feel like a
+    --     choice.
+    --   * Arming capture changed one word and nothing else. There is a hint
+    --     line under the button now that says how to cancel and how to clear,
+    --     and the button's own outline goes to the accent while it listens.
+    --
+    -- The panel is an outer box SH larger on every side than the visible body,
+    -- because the drop shadow is drawn outside the body's bounds and a
+    -- CanvasGroup clips to its own. Open() positions by the body, not the box.
     -----------------------------------------------------------------
-    local panel = Util.New("Frame", {
-        Name = "HotkeyPanel", BackgroundColor3 = Theme.Dark33, BorderSizePixel = 0,
-        Size = UDim2.fromOffset(S(175), S(105)),
+    -- HK_SH is the margin the shadow needs: 5 layers at 2px of reach extend
+    -- 10px sideways and, with the downward bias, 14px below. 16 clears it.
+    local HK_W, HK_H, HK_SH = S(196), S(129), S(16)
+    local HK_PAD = S(10)
+
+    local panel = library:Surface({
+        Name = "HotkeyPanel", BackgroundTransparency = 1,
+        Size = UDim2.fromOffset(HK_W + HK_SH * 2, HK_H + HK_SH * 2),
         Visible = false, ZIndex = 70, Parent = library.PopupLayer,
     })
-    Util.Corner(panel, S(M.Rounding))
-    Util.Stroke(panel, Theme.Dark42)
-    Util.Pad(panel, S(10), S(10), S(10), S(10))
-    Util.List(panel, S(8))
 
-    local heading = library:Label(panel, "KEYBIND", {
-        Color = Theme.TextInactive, Size = 11, Weight = "SemiBold",
-        Size2 = UDim2.new(1, 0, 0, S(12)),
+    local shadowHost = Util.New("Frame", {
+        Name = "ShadowHost", BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(HK_SH, HK_SH),
+        Size = UDim2.fromOffset(HK_W, HK_H),
+        ZIndex = 1, Parent = panel,
     })
-    heading.LayoutOrder = 1
+    Util.Shadow(shadowHost, S(M.Rounding), 5, S(2))
+
+    local body = Util.New("Frame", {
+        -- Dark33 + Dark42: the same surface the dropdown and colour popups use,
+        -- so all three read as the one layer floating above the window.
+        Name = "Body", BackgroundColor3 = Theme.Dark33, BorderSizePixel = 0,
+        Position = UDim2.fromOffset(HK_SH, HK_SH),
+        Size = UDim2.fromOffset(HK_W, HK_H),
+        ZIndex = 2, Parent = panel,
+    })
+    Util.Corner(body, S(M.Rounding))
+    Util.Stroke(body, Theme.Dark42)
+    Util.Pad(body, HK_PAD, HK_PAD, HK_PAD, HK_PAD)
+
+    -- Header: accent tick, feature name, hairline. "Enable Silent Aim" is a
+    -- toggle's wording; as a title the prefix is dead weight.
+    library:Accent(Util.New("Frame", {
+        Name = "Tick", BorderSizePixel = 0,
+        Position = UDim2.fromOffset(0, S(2)),
+        Size = UDim2.fromOffset(S(2), S(11)),
+        ZIndex = 3, Parent = body,
+    }))
+
+    library:Label(body, string.gsub(tostring(picker.Text), "^Enable ", ""), {
+        Color = Theme.TextActive, Size = 13, Weight = "SemiBold",
+        Position = UDim2.fromOffset(S(8), 0),
+        Size2 = UDim2.new(1, -S(8), 0, S(15)), ZIndex = 3,
+    })
+
+    Util.New("Frame", {
+        BackgroundColor3 = Theme.Dark42, BorderSizePixel = 0,
+        Position = UDim2.fromOffset(0, S(23)),
+        Size = UDim2.new(1, 0, 0, 1), ZIndex = 3, Parent = body,
+    })
 
     local bindButton = Util.New("TextButton", {
         Text = "", AutoButtonColor = false,
         BackgroundColor3 = Theme.Dark22, BorderSizePixel = 0,
-        Size = UDim2.new(1, 0, 0, S(22)), LayoutOrder = 2, ZIndex = 71,
-        Parent = panel,
+        Position = UDim2.fromOffset(0, S(33)),
+        Size = UDim2.new(1, 0, 0, S(28)), ZIndex = 3, Parent = body,
     })
     Util.Corner(bindButton, S(M.Rounding))
-    Util.Stroke(bindButton, Theme.Dark42)
+    local bindStroke = Util.Stroke(bindButton, Theme.Dark42)
 
     local bindLabel = library:Label(bindButton, "NONE", {
-        Color = Theme.TextActive, Size = 12, Weight = "SemiBold",
-        XAlign = Enum.TextXAlignment.Center, ZIndex = 72,
+        Color = Theme.TextActive, Size = 13, Weight = "SemiBold",
+        XAlign = Enum.TextXAlignment.Center, Truncate = false, ZIndex = 4,
     })
 
-    local modeHeading = library:Label(panel, "MODE", {
-        Color = Theme.TextInactive, Size = 11, Weight = "SemiBold",
-        Size2 = UDim2.new(1, 0, 0, S(12)),
+    local hintLabel = library:Label(body, "", {
+        Color = Theme.TextInactive, Size = 10,
+        XAlign = Enum.TextXAlignment.Center, Truncate = false,
+        Position = UDim2.fromOffset(0, S(67)),
+        Size2 = UDim2.new(1, 0, 0, S(11)), ZIndex = 3,
     })
-    modeHeading.LayoutOrder = 3
 
-    local modeRow = Util.New("Frame", {
-        BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, S(20)),
-        LayoutOrder = 4, ZIndex = 71, Parent = panel,
+    local bindFill   = Anim.track(bindButton, "BackgroundColor3", Theme.Dark22)
+    local bindOutline = Anim.track(bindStroke, "Color", Theme.Dark42)
+    local hoverBind  = false
+
+    -- Every control on the panel is DARKER than the panel, so it reads as cut
+    -- into the surface rather than sitting on it; hovering and arming lift it
+    -- toward the panel's own tone rather than away from it.
+    local function paintBind()
+        if library._capturing == picker then
+            Anim.set(bindFill, Theme.Dark37)
+            Anim.set(bindOutline, Theme.Accent)
+        else
+            Anim.set(bindFill, hoverBind and Theme.Dark27 or Theme.Dark22)
+            Anim.set(bindOutline, hoverBind and Theme.Dark55 or Theme.Dark42)
+        end
+    end
+
+    -----------------------------------------------------------------
+    -- Mode: one track, one sliding pill, three invisible hit cells.
+    -----------------------------------------------------------------
+    local MODES = { "Always", "Toggle", "Hold" }
+
+    local track = Util.New("Frame", {
+        Name = "Modes", BackgroundColor3 = Theme.Dark22, BorderSizePixel = 0,
+        Position = UDim2.fromOffset(0, S(87)),
+        Size = UDim2.new(1, 0, 0, S(22)), ZIndex = 3, Parent = body,
     })
-    Util.List(modeRow, S(4), Enum.FillDirection.Horizontal)
+    Util.Corner(track, S(M.Rounding))
 
-    local modeButtons = {}
-    for order, mode in ipairs({ "Always", "Toggle", "Hold" }) do
+    local pill = Util.New("Frame", {
+        Name = "Selection", BackgroundColor3 = Theme.Accent, BorderSizePixel = 0,
+        Position = UDim2.new(0, S(2), 0, S(2)),
+        Size = UDim2.new(1 / #MODES, -S(4), 1, -S(4)),
+        ZIndex = 2, Parent = track,
+    })
+    Util.Corner(pill, S(M.Rounding))
+    library:Accent(pill)
+
+    -- Driven as a cell index rather than a scale so the easing is in the same
+    -- units as the thing being chosen; the apply divides it back out.
+    local pillSlide = Scalar.track(0, function(value)
+        pill.Position = UDim2.new(value / #MODES, S(2), 0, S(2))
+    end)
+
+    local modeCells = {}
+    for order, mode in ipairs(MODES) do
         local cell = Util.New("TextButton", {
-            Text = "", AutoButtonColor = false,
-            BackgroundColor3 = Theme.Dark22, BorderSizePixel = 0,
-            Size = UDim2.new(1 / 3, -S(3), 1, 0), LayoutOrder = order,
-            ZIndex = 71, Parent = modeRow,
+            Text = "", AutoButtonColor = false, BackgroundTransparency = 1,
+            Position = UDim2.new((order - 1) / #MODES, 0, 0, 0),
+            Size = UDim2.new(1 / #MODES, 0, 1, 0),
+            ZIndex = 3, Parent = track,
         })
-        Util.Corner(cell, S(M.Rounding))
 
         local text = library:Label(cell, mode, {
-            Color = Theme.TextInactive, Size = 11,
-            XAlign = Enum.TextXAlignment.Center, Truncate = false, ZIndex = 72,
+            Color = Theme.TextInactive, Size = 11, Weight = "SemiBold",
+            XAlign = Enum.TextXAlignment.Center, Truncate = false, ZIndex = 4,
         })
 
-        modeButtons[mode] = {
-            Frame = cell,
-            Fill = Anim.track(cell, "BackgroundColor3", Theme.Dark22),
+        modeCells[order] = {
+            Mode = mode, Frame = cell, Hovered = false,
             Text = Anim.track(text, "TextColor3", Theme.TextInactive),
         }
 
@@ -2494,18 +2638,70 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
         end)
     end
 
-    function picker:_RefreshPanel()
-        bindLabel.Text = library._capturing == self
-            and "PRESS A KEY" or Util.KeyLabel(self.Value)
-        for mode, record in pairs(modeButtons) do
-            local on = self.Mode == mode
-            Anim.set(record.Fill, on and Theme.Accent or Theme.Dark22)
-            Anim.set(record.Text, on and Theme.Black or Theme.TextInactive)
+    local function paintModes()
+        for _, record in ipairs(modeCells) do
+            local selected = picker.Mode == record.Mode
+            local color
+            if selected then
+                color = Theme.Black
+            elseif record.Hovered then
+                color = Theme.TextActive
+            else
+                color = Theme.TextInactive
+            end
+            Anim.set(record.Text, color)
         end
     end
 
+    -- One watcher for the whole panel instead of one per control: it is three
+    -- rectangle tests and it only runs while the panel is open.
+    library:Watch(function(point)
+        if not panel.Parent then return false end
+        if not panel.Visible then return end
+
+        local over = Util.PointInside(bindButton, point)
+        if over ~= hoverBind then
+            hoverBind = over
+            paintBind()
+        end
+
+        for _, record in ipairs(modeCells) do
+            local hovered = Util.PointInside(record.Frame, point)
+            if hovered ~= record.Hovered then
+                record.Hovered = hovered
+                paintModes()
+            end
+        end
+    end)
+
+    function picker:_RefreshPanel()
+        local capturing = library._capturing == self
+        bindLabel.Text = capturing and "PRESS A KEY" or Util.KeyLabel(self.Value)
+        -- Kept under ~24 characters: at 10px that is the widest string that
+        -- still fits the body's 176px of inner width, and the label does not
+        -- truncate (a truncated hint is worse than no hint).
+        hintLabel.Text = capturing
+            and "ESC cancel    BACK clear"
+            or  "Right-click cog for mode"
+        paintBind()
+
+        pillSlide.Target = (table.find(MODES, self.Mode) or 2) - 1
+        paintModes()
+    end
+
+    -- Where the body wants to sit, kept out here so the slide's apply can add
+    -- its offset to it every frame without recomputing the placement.
+    local panelX, panelY = 0, 0
+
+    local panelSlide = Scalar.track(0, function(value)
+        panel.Position = UDim2.fromOffset(panelX, panelY + value)
+    end)
+
+    local panelFade = library.CanFade
+        and Anim.track(panel, "GroupTransparency", 1) or nil
+
     function picker:HitTest(point)
-        return Util.PointInside(panel, point) or Util.PointInside(button, point)
+        return Util.PointInside(body, point) or Util.PointInside(button, point)
     end
 
     function picker:Close()
@@ -2517,15 +2713,38 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
     function picker:Open()
         library:CloseAllPopups(self)
         self.IsOpen = true
+
+        -- Placed against the body's rect. The panel itself is HK_SH larger on
+        -- every side, so it hangs back and up by that much.
         local origin = button.AbsolutePosition
         local viewport = library.ScreenGui.AbsoluteSize
-        local x = Util.Clamp(origin.X + S(M.HotkeyW) - S(175), 8,
-                             math.max(viewport.X - S(175) - 8, 8))
+        local x = Util.Clamp(origin.X + S(M.HotkeyW) - HK_W, 8,
+                             math.max(viewport.X - HK_W - 8, 8))
         local y = origin.Y + S(M.HotkeyH) + S(6)
-        if y + S(105) > viewport.Y then y = math.max(origin.Y - S(105) - S(6), 8) end
-        panel.Position = UDim2.fromOffset(x, y)
-        panel.Visible = true
+        if y + HK_H > viewport.Y then y = math.max(origin.Y - HK_H - S(6), 8) end
+        panelX, panelY = x - HK_SH, y - HK_SH
+
         self:_RefreshPanel()
+
+        -- The pill animates when you pick a mode, not when the panel appears,
+        -- so it is snapped to the current one on open.
+        pillSlide.Value = pillSlide.Target
+        pill.Position = UDim2.new(pillSlide.Value / #MODES, S(2), 0, S(2))
+
+        -- Rises into place as it fades up. Both have to be seeded by hand:
+        -- Scalar skips the apply once it has converged, and the fade would
+        -- otherwise still be sitting at the last open's finished value.
+        panelSlide.Value = S(6)
+        panelSlide.Target = 0
+        panel.Position = UDim2.fromOffset(panelX, panelY + panelSlide.Value)
+
+        if panelFade then
+            panelFade.Value = 1
+            panel.GroupTransparency = 1
+            Anim.set(panelFade, 0)
+        end
+
+        panel.Visible = true
     end
 
     library:RegisterPopup(picker)
@@ -3166,109 +3385,247 @@ end
 -- KEYBIND LIST
 --
 -- Not part of the original framework, but Private.lua expects one. Built in the
--- same vocabulary: dark18 panel, dark34 hairline, a dark33 chip per key and the
--- accent for anything currently live.
+-- same vocabulary: dark18 panel, a hairline under the heading, a chip per key
+-- and the accent for anything currently live.
+--
+-- The first pass rebuilt the whole list whenever ANYTHING changed, including a
+-- bind going on or off - which is most of what this panel ever does. Destroying
+-- a row and making a new one in the new colour is a hard cut, and a list that
+-- hard-cuts ten times a fight is the thing that reads as cheap no matter how it
+-- is styled.
+--
+-- So the signature that triggers a rebuild covers membership only: which binds
+-- exist and what they are bound to. State is pushed onto the rows that are
+-- already there, every frame, through the same easing everything else uses, so
+-- a bind coming live fades up instead of blinking.
+--
+-- Height is driven rather than auto-sized, for two reasons: the shadow is drawn
+-- outside the body's bounds and AutomaticSize would measure it and grow
+-- forever, and a driven height can ease, so binding something new makes the
+-- panel grow into the row instead of jumping.
 ---------------------------------------------------------------------------------
 function Library:_CreateKeybindList()
     self:_CreateRoot()
     if self.KeybindFrame then return end
 
-    local frame = Util.New("Frame", {
-        Name = "Keybinds", BackgroundColor3 = Theme.Dark18, BorderSizePixel = 0,
-        Position = UDim2.new(0, S(20), 0.45, 0),
-        Size = UDim2.fromOffset(S(180), 0),
-        AutomaticSize = Enum.AutomaticSize.Y,
+    -- Design units, scaled at use. KB_HEAD is everything above the first row:
+    -- the 14px heading, 7px of air, the 1px hairline, then 8px more.
+    local KB_PAD, KB_HEAD = 10, 30
+    local KB_ROW, KB_GAP  = 20, 4
+
+    -- SH is the margin the shadow needs; see the hotkey panel for the maths.
+    local W, SH = S(196), S(16)
+
+    local function bodyHeight(count)
+        local inner = count > 0
+            and (count * S(KB_ROW) + (count - 1) * S(KB_GAP))
+            or S(KB_ROW)
+        return S(KB_PAD) * 2 + S(KB_HEAD) + inner
+    end
+
+    local height = bodyHeight(0)
+
+    local holder = Util.New("Frame", {
+        Name = "Keybinds", BackgroundTransparency = 1,
+        Position = UDim2.new(0, S(20) - SH, 0.42, -SH),
+        Size = UDim2.fromOffset(W + SH * 2, height + SH * 2),
         ZIndex = 4000, Visible = false, Active = true, Parent = self.ScreenGui,
     })
-    Util.Corner(frame, S(M.Rounding))
-    Util.Stroke(frame, Theme.Dark34)
-    Util.Pad(frame, S(10), S(10), S(10), S(10))
-    Util.List(frame, S(6))
-    self.KeybindFrame = frame
+    self.KeybindFrame = holder
 
-    local heading = self:Label(frame, "KEYBINDS", {
-        Color = Theme.TextInactive, Size = 12, Weight = "SemiBold",
-        Size2 = UDim2.new(1, 0, 0, S(14)),
+    local shadowHost = Util.New("Frame", {
+        Name = "ShadowHost", BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(SH, SH),
+        Size = UDim2.fromOffset(W, height),
+        ZIndex = 1, Parent = holder,
     })
-    heading.LayoutOrder = 0
+    Util.Shadow(shadowHost, S(M.Rounding), 5, S(2))
 
-    self.KeybindRows = Util.New("Frame", {
-        BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0),
-        AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 1, Parent = frame,
+    local body = Util.New("Frame", {
+        Name = "Body", BackgroundColor3 = Theme.Dark18, BorderSizePixel = 0,
+        Position = UDim2.fromOffset(SH, SH),
+        Size = UDim2.fromOffset(W, height),
+        ClipsDescendants = true, ZIndex = 2, Parent = holder,
     })
-    Util.List(self.KeybindRows, S(4))
+    Util.Corner(body, S(M.Rounding))
+    Util.Stroke(body, Theme.Dark34)
+    Util.Pad(body, S(KB_PAD), S(KB_PAD), S(KB_PAD), S(KB_PAD))
 
-    self:Draggable(frame, { frame })
+    -- Eases the three rects that make up the panel together.
+    local grow = Scalar.track(height, function(value)
+        local rounded = math.floor(value + 0.5)
+        holder.Size     = UDim2.fromOffset(W + SH * 2, rounded + SH * 2)
+        shadowHost.Size = UDim2.fromOffset(W, rounded)
+        body.Size       = UDim2.fromOffset(W, rounded)
+    end)
 
-    local nextPoll = 0
+    -----------------------------------------------------------------
+    -- Header: accent tick, label, live count, hairline.
+    -----------------------------------------------------------------
+    self:Accent(Util.New("Frame", {
+        Name = "Tick", BorderSizePixel = 0,
+        Position = UDim2.fromOffset(0, S(2)),
+        Size = UDim2.fromOffset(S(2), S(11)),
+        ZIndex = 3, Parent = body,
+    }))
+
+    self:Label(body, "KEYBINDS", {
+        Color = Theme.TextInactive, Size = 11, Weight = "SemiBold",
+        Position = UDim2.fromOffset(S(8), 0),
+        Size2 = UDim2.new(1, -S(32), 0, S(14)), ZIndex = 3,
+    })
+
+    -- Not decoration: with the panel this small the count is how you tell
+    -- "nothing is bound" from "the list is scrolled off", and it is where your
+    -- eye already is after reading the heading.
+    local countLabel = self:Label(body, "", {
+        Color = Theme.TextInactive, Size = 11, Weight = "SemiBold",
+        XAlign = Enum.TextXAlignment.Right, Truncate = false,
+        AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.new(1, 0, 0, 0),
+        Size2 = UDim2.fromOffset(S(24), S(14)), ZIndex = 3,
+    })
+
+    Util.New("Frame", {
+        BackgroundColor3 = Theme.Dark34, BorderSizePixel = 0,
+        Position = UDim2.fromOffset(0, S(21)),
+        Size = UDim2.new(1, 0, 0, 1), ZIndex = 3, Parent = body,
+    })
+
+    local list = Util.New("Frame", {
+        Name = "Rows", BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(0, S(KB_HEAD)),
+        Size = UDim2.new(1, 0, 1, -S(KB_HEAD)),
+        ZIndex = 3, Parent = body,
+    })
+    Util.List(list, S(KB_GAP))
+    self.KeybindRows = list
+
+    local empty = Util.New("Frame", {
+        Name = "Empty", BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, S(KB_ROW)),
+        LayoutOrder = 1, Visible = false, ZIndex = 4, Parent = list,
+    })
+    self:Label(empty, "Nothing bound", {
+        Color = Theme.TextInactive, Size = 12, ZIndex = 5,
+    })
+
+    self:Draggable(holder, { holder })
+
+    -----------------------------------------------------------------
+    -- Rows
+    -----------------------------------------------------------------
+    local records, nextPoll = {}, 0
+
+    local function buildRow(picker, order)
+        local row = Util.New("Frame", {
+            BackgroundTransparency = 1,
+            Size = UDim2.new(1, 0, 0, S(KB_ROW)),
+            LayoutOrder = order, ZIndex = 4, Parent = list,
+        })
+
+        -- A 3px pip rather than the word ON. You are reading presence at a
+        -- glance, and it keeps the row to three things wide.
+        local pip = Util.New("Frame", {
+            Name = "Pip", BackgroundColor3 = Theme.Dark42, BorderSizePixel = 0,
+            AnchorPoint = Vector2.new(0, 0.5),
+            Position = UDim2.new(0, 0, 0.5, 0),
+            Size = UDim2.fromOffset(S(3), S(3)), ZIndex = 5, Parent = row,
+        })
+        Util.Corner(pip, S(2))
+
+        -- 92px of the 176px row is reserved for the chip, which auto-sizes and
+        -- grows leftward: a long KeyCode name ("RIGHTBRACKET") is about 84px,
+        -- so anything less and the chip would overlap the truncated name.
+        local name = self:Label(row, "", {
+            Color = Theme.TextInactive, Size = 12,
+            Position = UDim2.fromOffset(S(10), 0),
+            Size2 = UDim2.new(1, -S(92), 1, 0), ZIndex = 5,
+        })
+
+        local chip = Util.New("Frame", {
+            Name = "Chip", BackgroundColor3 = Theme.Dark33, BorderSizePixel = 0,
+            AnchorPoint = Vector2.new(1, 0.5),
+            Position = UDim2.new(1, 0, 0.5, 0),
+            Size = UDim2.fromOffset(0, S(16)),
+            AutomaticSize = Enum.AutomaticSize.X, ZIndex = 5, Parent = row,
+        })
+        Util.Corner(chip, S(M.Rounding))
+        Util.Pad(chip, 0, 0, S(6), S(6))
+        local chipStroke = Util.Stroke(chip, Theme.Dark42)
+
+        local chipLabel = self:Label(chip, "", {
+            Color = Theme.TextHovered, Size = 11, Weight = "SemiBold",
+            Truncate = false, XAlign = Enum.TextXAlignment.Center,
+            Size2 = UDim2.fromOffset(0, S(16)),
+            AutoSize = Enum.AutomaticSize.X, ZIndex = 6,
+        })
+
+        return {
+            Picker = picker, Frame = row,
+            Name = name, ChipLabel = chipLabel, On = nil,
+            Pip    = Anim.track(pip, "BackgroundColor3", Theme.Dark42),
+            Text   = Anim.track(name, "TextColor3", Theme.TextInactive),
+            Fill   = Anim.track(chip, "BackgroundColor3", Theme.Dark33),
+            Key    = Anim.track(chipLabel, "TextColor3", Theme.TextHovered),
+            Stroke = Anim.track(chipStroke, "Transparency", 0),
+        }
+    end
 
     self:Watch(function()
         if not self.ShowKeybinds then
-            if frame.Visible then frame.Visible = false end
+            if holder.Visible then holder.Visible = false end
             return
         end
+        if not holder.Visible then holder.Visible = true end
 
+        -- Membership is scanned on a timer; state below is applied every frame,
+        -- because a bind you just pressed has to answer immediately.
         local now = os.clock()
-        if now < nextPoll then return end
-        nextPoll = now + 0.15
+        if now >= nextPoll then
+            nextPoll = now + 0.1
 
-        local rows, parts = {}, {}
-        for _, picker in ipairs(self._keybinds) do
-            if picker.Value and picker.Value ~= "" and picker.ShowInList then
-                local active = picker:GetState()
-                local name = string.gsub(picker.Text, "^Enable ", "")
-                rows[#rows + 1] = { Name = name, Key = Util.KeyLabel(picker.Value), On = active }
-                parts[#parts + 1] = name .. "|" .. picker.Value .. "|" .. tostring(active)
+            local live, parts = {}, {}
+            for _, picker in ipairs(self._keybinds) do
+                if picker.Value and picker.Value ~= "" and picker.ShowInList then
+                    live[#live + 1] = picker
+                    parts[#parts + 1] = tostring(picker.Text) .. "|" .. picker.Value
+                end
+            end
+
+            local signature = table.concat(parts, ";")
+            if signature ~= self._keybindSignature then
+                self._keybindSignature = signature
+
+                for _, record in ipairs(records) do record.Frame:Destroy() end
+                records = {}
+
+                for order, picker in ipairs(live) do
+                    local record = buildRow(picker, order + 1)
+                    -- "Enable Silent Aim" reads as "Silent Aim": the prefix
+                    -- earns its place on a toggle, not in a list where every
+                    -- row is already a feature.
+                    record.Name.Text = string.gsub(tostring(picker.Text), "^Enable ", "")
+                    record.ChipLabel.Text = Util.KeyLabel(picker.Value)
+                    records[order] = record
+                end
+
+                empty.Visible = #live == 0
+                countLabel.Text = #live > 0 and tostring(#live) or ""
+                grow.Target = bodyHeight(#live)
             end
         end
 
-        local signature = table.concat(parts, ";")
-        frame.Visible = true
-        if signature == self._keybindSignature then return end
-        self._keybindSignature = signature
-
-        for _, child in ipairs(self.KeybindRows:GetChildren()) do
-            if child:IsA("Frame") then child:Destroy() end
-        end
-
-        if #rows == 0 then
-            local holder = Util.New("Frame", {
-                BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, S(16)),
-                LayoutOrder = 1, Parent = self.KeybindRows,
-            })
-            self:Label(holder, "None", { Color = Theme.TextInactive, Size = 12 })
-            return
-        end
-
-        for order, row in ipairs(rows) do
-            local holder = Util.New("Frame", {
-                BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, S(16)),
-                LayoutOrder = order, Parent = self.KeybindRows,
-            })
-
-            self:Label(holder, row.Name, {
-                Color = row.On and Theme.TextActive or Theme.TextInactive, Size = 12,
-                Size2 = UDim2.new(1, -S(64), 1, 0),
-            })
-
-            local chip = Util.New("Frame", {
-                BackgroundColor3 = row.On and Theme.Accent or Theme.Dark33,
-                BorderSizePixel = 0,
-                AnchorPoint = Vector2.new(1, 0.5),
-                Position = UDim2.new(1, 0, 0.5, 0),
-                Size = UDim2.fromOffset(0, S(16)),
-                AutomaticSize = Enum.AutomaticSize.X, Parent = holder,
-            })
-            Util.Corner(chip, S(M.Rounding))
-            Util.Pad(chip, 0, 0, S(6), S(6))
-
-            self:Label(chip, row.Key, {
-                Color = row.On and Theme.Black or Theme.TextHovered,
-                Size = 11, Weight = "SemiBold", Truncate = false,
-                XAlign = Enum.TextXAlignment.Center,
-                Size2 = UDim2.fromOffset(0, S(16)),
-                AutoSize = Enum.AutomaticSize.X,
-            })
+        for _, record in ipairs(records) do
+            local on = record.Picker:GetState() and true or false
+            if on ~= record.On then
+                record.On = on
+                Anim.set(record.Pip,    on and Theme.Accent or Theme.Dark42)
+                Anim.set(record.Text,   on and Theme.TextActive or Theme.TextInactive)
+                Anim.set(record.Fill,   on and Theme.Accent or Theme.Dark33)
+                Anim.set(record.Key,    on and Theme.Black or Theme.TextHovered)
+                Anim.set(record.Stroke, on and 1 or 0)
+            end
         end
     end)
 end
