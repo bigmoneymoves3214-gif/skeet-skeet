@@ -1677,6 +1677,13 @@ function Groupbox:AddSlider(index, options)
     end
 
     function slider:SetValue(value, silent)
+        -- Coerced before clamping. Clamp compares the value against Min, so a
+        -- nil or a numeric string - from a caller, or from a config file,
+        -- which is just text on disk - threw inside that comparison rather
+        -- than anywhere that named the slider.
+        value = tonumber(value)
+        if not value then return end
+
         value = Util.Clamp(value, self.Min, self.Max)
         value = rounding > 0 and Util.Round(value, rounding) or math.floor(value + 0.5)
         self.Value = value
@@ -2406,9 +2413,21 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
         for _, callback in ipairs(self.Callbacks) do
             pcall(callback, state, self.Value, self.Mode)
         end
-        if self.SyncToggle and self.Parent then
+
+        -- Only a BOUND key syncs its toggle. GetRawState answers true for an
+        -- unbound picker, and that answer is right for what it is for - gating,
+        -- where "no key" must not block the feature - but it is not a keybind
+        -- state, and pushing it into the toggle switched the feature ON.
+        --
+        -- Which is what made loading a config turn things on by itself: the
+        -- restore assigns the saved key, that fires, and a picker with no key
+        -- reported "on" and forced its toggle true. Every feature with a
+        -- SyncToggleState bind and no key set came up enabled on every load,
+        -- autoload included.
+        if self.SyncToggle and self.Parent and self.Value ~= "" then
             self.Parent:SetValue(self:GetRawState())
         end
+
         self:_Repaint()
     end
 
@@ -3991,8 +4010,23 @@ function SaveManager:_Restore(option, record)
         if mode ~= "Always" and mode ~= "Toggle" and mode ~= "Hold" then
             mode = "Toggle"
         end
+
+        -- Silent, both of them. A keybind is a BIND; whether the feature is on
+        -- is the toggle's business, and the toggle has already been restored
+        -- from data.Toggles by the loop above. Firing here let the picker
+        -- overwrite that - true when no key was set, false when one was,
+        -- because assigning a key clears Active - so the saved toggle value was
+        -- destroyed either way on every single load.
         option:SetMode(mode, true)
-        option:SetValue(type(record.key) == "string" and record.key or "")
+        option:SetValue(type(record.key) == "string" and record.key or "", true)
+
+        -- A Toggle-mode picker keeps its own on/off in Active, and after a
+        -- restore that has to agree with the toggle it drives. Otherwise the
+        -- first press of the key re-asserts the state the feature is already in
+        -- and reads as the bind doing nothing.
+        if option.SyncToggle and option.Parent and option.Mode == "Toggle" then
+            option.Active = option.Parent.Value and true or false
+        end
 
     elseif kind == "Slider" then
         -- The one that actually threw: SetValue runs Util.Clamp, which compares
