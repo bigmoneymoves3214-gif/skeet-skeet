@@ -92,27 +92,35 @@ local Theme = {
 -- METRICS  (settings/elements.h + settings/variables.h, verbatim)
 ---------------------------------------------------------------------------------
 local M = {
-    Rounding  = 2,
+    -- 6, not the original 2. The reference menu rounds its window and every
+    -- card at about this radius, and it is the single biggest reason the two
+    -- look different at a glance: a 2px radius reads as a square box with the
+    -- corners knocked off, a 6px one reads as a rounded panel.
+    Rounding  = 6,
     AnimSpeed = 14,
 
     WindowW   = 650,
     WindowH   = 600,
     ScrollW   = 6,
 
-    TitlebarH = 80,
-    TitlebarSpacing = 10,
+    -- The window is ONE panel now. The original draws a titlebar and a content
+    -- rect with a real gap between them; the reference has a single surface
+    -- with the branding and tabs sitting on top of it, so the spacing is zero
+    -- and the bar is less than half as tall.
+    TitlebarH = 46,
+    TitlebarSpacing = 0,
     TripleW   = 25,
 
     -- gui.cpp: dummy(25,0), dummy_line(50), then tabs with 20 spacing
     TabsStartGap = 25,
     TabsLineGap  = 50,
-    TabSpacing   = 20,
+    TabSpacing   = 18,
     TabSplitGap  = 10,     -- the dummy_line after tab index 3
     TabSplitAfter = 4,     -- 0-based index 3, so after the 4th tab
-    TabFontSize  = 18,
+    TabFontSize  = 13,
 
-    ContentPad     = 15,
-    ContentSpacing = 15,
+    ContentPad     = 14,
+    ContentSpacing = 12,
 
     CardW        = 302,
     CardWScroll  = 292,
@@ -120,9 +128,9 @@ local M = {
 
     RowFontSize  = 14,
 
-    CheckboxH    = 35,
+    CheckboxH    = 28,
     CheckboxHueH = 50,
-    CheckboxBox  = 15,
+    CheckboxBox  = 14,
     CheckboxPadX = 10,
     CheckboxPadY = 10,
     CheckmarkSize = 7,
@@ -957,18 +965,26 @@ function Library:CreateWindow(config)
     window.Root = root
 
     -----------------------------------------------------------------
-    -- Titlebar
+    -- One panel.
+    --
+    -- The original draws two rects with a real gap between them, a titlebar
+    -- plane above a content plane. The reference is a single surface with the
+    -- branding and the tabs sitting ON it, which is why its titlebar has no
+    -- edge of its own and no colour of its own - so there is one filled,
+    -- rounded, stroked frame here, and the bar is a transparent region of it.
     -----------------------------------------------------------------
-    local titlebar = Util.New("Frame", {
-        Name = "Titlebar", BackgroundColor3 = Theme.Dark14,
-        -- 0.85 alpha in the original sits over a background blur we cannot do;
-        -- kept anyway so the titlebar still reads as a lighter plane than the
-        -- content panel rather than identical to it.
-        BackgroundTransparency = 0.15,
-        BorderSizePixel = 0,
-        Size = UDim2.fromOffset(winW, barH), Parent = root,
+    local panel = Util.New("Frame", {
+        Name = "Panel", BackgroundColor3 = Theme.Dark14, BorderSizePixel = 0,
+        Size = UDim2.fromScale(1, 1), Parent = root,
     })
-    Util.Corner(titlebar, wr)
+    Util.Corner(panel, wr)
+    Util.Stroke(panel, Theme.Dark27)
+    window.Panel = panel
+
+    local titlebar = Util.New("Frame", {
+        Name = "Titlebar", BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, barH), ZIndex = 2, Parent = panel,
+    })
     self:Draggable(titlebar, { root })
 
     -----------------------------------------------------------------
@@ -1090,12 +1106,15 @@ function Library:CreateWindow(config)
     -----------------------------------------------------------------
     -- Content panel
     -----------------------------------------------------------------
+    -- A transparent region of the panel, not a plane of its own. In the
+    -- reference the cards are the only thing below the titlebar that has a
+    -- fill, so the area behind them is simply the window.
     local content = Util.New("Frame", {
-        Name = "Content", BackgroundColor3 = Theme.Dark18, BorderSizePixel = 0,
+        Name = "Content", BackgroundTransparency = 1,
         Position = UDim2.fromOffset(0, barH + gap),
-        Size = UDim2.fromOffset(winW, winH - barH - gap), Parent = root,
+        Size = UDim2.fromOffset(winW, winH - barH - gap),
+        ZIndex = 2, Parent = panel,
     })
-    Util.Corner(content, wr)
     window.ContentFrame = content
 
     -- ScrollingFrame has no track colour, so the dark26 track the original
@@ -1399,17 +1418,42 @@ function Tab:_NewCard(column)
         Library = library, Tab = self, Order = 0, Rows = {},
     }, Groupbox)
 
+    -- Dark18 on the panel's Dark14, with a Dark27 edge: barely lighter than
+    -- what it sits on. That restraint is most of why the reference reads as a
+    -- quiet sheet of panels rather than a stack of boxes - Dark22 with a Dark34
+    -- edge was a step too strong on both counts.
     local frame = Util.New("Frame", {
-        Name = "Card", BackgroundColor3 = Theme.Dark22, BorderSizePixel = 0,
+        Name = "Card", BackgroundColor3 = Theme.Dark18, BorderSizePixel = 0,
         Size = UDim2.new(1, 0, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
         LayoutOrder = #self.Cards + 1, Parent = column,
     })
     Util.Corner(frame, S(M.Rounding))
-    Util.Stroke(frame, Theme.Dark34)
-    Util.Pad(frame, 0, 0, S(M.CheckboxPadX), S(M.CheckboxPadX))
-    Util.List(frame, 0)
+    Util.Stroke(frame, Theme.Dark27)
+    Util.Pad(frame, S(10), S(10), S(12), S(12))
+    Util.List(frame, S(2))
     box.Frame = frame
+
+    -- Every card carries a heading. The old builder took a name and used it
+    -- only to rename the Instance, so the title each card has in the reference
+    -- was never drawn at all - which is most of why the two did not match below
+    -- the titlebar. Built here and filled in by SetTitle.
+    box.TitleRow = Util.New("Frame", {
+        Name = "Title", BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, S(20)),
+        Visible = false, LayoutOrder = 0, Parent = frame,
+    })
+
+    box.TitleLabel = library:Label(box.TitleRow, "", {
+        Color = Theme.TextActive, Size = 13, Weight = "SemiBold",
+        Size2 = UDim2.new(1, 0, 1, 0),
+    })
+
+    function box:SetTitle(text)
+        text = text and tostring(text) or ""
+        self.TitleLabel.Text = text
+        self.TitleRow.Visible = text ~= ""
+    end
 
     self.Cards[#self.Cards + 1] = box
     return box
@@ -1420,13 +1464,19 @@ end
 -- compatibility and used only as the instance name.
 function Tab:AddLeftGroupbox(name, _weight)
     local box = self:_NewCard(self.Left)
-    if name then box.Frame.Name = tostring(name) end
+    if name then
+        box.Frame.Name = tostring(name)
+        box:SetTitle(name)
+    end
     return box
 end
 
 function Tab:AddRightGroupbox(name, _weight)
     local box = self:_NewCard(self.Right)
-    if name then box.Frame.Name = tostring(name) end
+    if name then
+        box.Frame.Name = tostring(name)
+        box:SetTitle(name)
+    end
     return box
 end
 
@@ -1448,21 +1498,22 @@ function Groupbox:_Row(height, noSeparator)
     })
     self.Rows[#self.Rows + 1] = row
 
-    -- A spacer row owns no rule. Without this a divider would show the previous
-    -- row's line, a gap, then its own - two lines where the point was one gap.
-    if noSeparator then return row, nil end
-
+    -- No rule between rows any more.
+    --
+    -- The original rules every row, which suits its denser spacing; the
+    -- reference separates rows with air alone, and at this row height a line
+    -- between each one turns a card into a table. The separator object is still
+    -- returned, hidden, because AddDivider and a few callers hold onto it - so
+    -- nothing downstream has to know this changed.
     local separator = Util.New("Frame", {
-        Name = "Separator", BackgroundColor3 = Theme.Dark34, BorderSizePixel = 0,
+        Name = "Separator", BackgroundColor3 = Theme.Dark27, BorderSizePixel = 0,
         AnchorPoint = Vector2.new(0, 1),
         Position = UDim2.new(0, 0, 1, 0),
-        Size = UDim2.new(1, 0, 0, 1), Parent = row,
+        Size = UDim2.new(1, 0, 0, 1),
+        Visible = false, Parent = row,
     })
 
-    if self.LastSeparator then self.LastSeparator.Visible = true end
-    separator.Visible = false
-    self.LastSeparator = separator
-
+    if noSeparator then return row, nil end
     return row, separator
 end
 
@@ -1809,27 +1860,38 @@ function Groupbox:AddDropdown(index, options)
     local library = self.Library
 
     local multi = options.Multi and true or false
-    local row = self:_Row(M.ComboH)
+
+    -- Stacked, not side by side.
+    --
+    -- The original puts the name on the left of the row and a 90px box on the
+    -- right. The reference puts the name ABOVE a full-width field, which is
+    -- what lets the open list line up with the field edge-to-edge instead of
+    -- hanging off one end of the row - and gives long option names somewhere
+    -- to go. The row is taller to pay for it.
+    local row = self:_Row(M.ComboH + 16)
 
     local label = library:Label(row, options.Text or index, {
-        Color = Theme.TextInactive,
-        Size2 = UDim2.new(1, -S(M.ComboBoxW + 10), 1, 0),
+        Color = Theme.TextInactive, Size = 12,
+        Size2 = UDim2.new(1, 0, 0, S(16)),
     })
 
     local box = framedBox(row, {
         Name = "Box",
-        AnchorPoint = Vector2.new(1, 0.5),
-        Position = UDim2.new(1, 0, 0.5, 0),
-        Size = UDim2.fromOffset(S(M.ComboBoxW), S(M.ComboBoxH)),
+        Position = UDim2.fromOffset(0, S(18)),
+        Size = UDim2.new(1, 0, 0, S(M.ComboBoxH + 2)),
         ZIndex = 2, Parent = row,
     })
 
+    -- The value reads in the accent, the way the reference shows a selection.
+    -- It is the only text on the row that is not grey or white, which is what
+    -- makes a glance down a card land on what is actually set.
     local preview = library:Label(box, "", {
-        Color = Theme.TextActive, Size = 12,
+        Color = Theme.Accent, Size = 12,
         Position = UDim2.fromOffset(S(M.ComboFrameX), 0),
-        Size2 = UDim2.new(1, -S(M.ComboFrameX + 19), 1, 0), ZIndex = 3,
+        Size2 = UDim2.new(1, -S(M.ComboFrameX + 22), 1, 0), ZIndex = 3,
     })
-    comboArrow(box, 8)
+    library:Accent(preview, "TextColor3")
+    comboArrow(box, 10)
 
     local hit = Util.New("TextButton", {
         Name = "Hit", Text = "", AutoButtonColor = false,
@@ -2001,11 +2063,13 @@ function Groupbox:AddDropdown(index, options)
         local height = count * S(M.SelectableH) + (count - 1) * S(M.ComboPad)
             + S(M.ComboPad * 2)
         local origin = box.AbsolutePosition
-        local below = origin.Y + box.AbsoluteSize.Y + S(M.ComboPad)
+        -- Flush under the field, not floating off it: 2px, so the list reads as
+        -- the field opening rather than a separate panel appearing nearby.
+        local below = origin.Y + box.AbsoluteSize.Y + S(2)
         local viewport = library.ScreenGui.AbsoluteSize.Y
 
-        if below + height > viewport and origin.Y - height - S(M.ComboPad) > 0 then
-            below = origin.Y - height - S(M.ComboPad)
+        if below + height > viewport and origin.Y - height - S(2) > 0 then
+            below = origin.Y - height - S(2)
         end
 
         popup.Position = UDim2.fromOffset(origin.X, below)
@@ -3373,13 +3437,19 @@ end
 
 function SubTab:AddLeftGroupbox(name)
     local box = self.Tab:_NewCard(self.Left)
-    if name then box.Frame.Name = tostring(name) end
+    if name then
+        box.Frame.Name = tostring(name)
+        box:SetTitle(name)
+    end
     return box
 end
 
 function SubTab:AddRightGroupbox(name)
     local box = self.Tab:_NewCard(self.Right)
-    if name then box.Frame.Name = tostring(name) end
+    if name then
+        box.Frame.Name = tostring(name)
+        box:SetTitle(name)
+    end
     return box
 end
 
