@@ -38,11 +38,11 @@
 
     WHAT CANNOT BE 1:1
     ------------------
-    The original uses Tektur, a font that does not exist in Roblox and cannot be
-    added without uploading it as an asset. Montserrat is the closest of the
-    built-in families. Set Library.FontFamily before CreateWindow to change it;
-    if you upload Tektur yourself, point that at your asset and the port is
-    exact.
+    BuilderSans, Roblox's own interface face. Type.init takes a chain of
+    families and uses the first that builds, so Library.FontFamily set before
+    CreateWindow is a preference rather than a bet: point it at an uploaded
+    asset and that wins, give it a name that does not exist and it falls
+    through to the next rather than dropping the menu into SourceSans.
 
     Blur: draw_background_blur() behind the titlebar and watermark needs the
     DX11 swapchain. Nothing in Roblox can blur what is behind a ScreenGui, so
@@ -83,20 +83,35 @@ local Theme = {
     Dark42 = Color3.fromRGB(42, 42, 58),
     Dark55 = Color3.fromRGB(55, 55, 75),
 
-    TextActive   = Color3.fromRGB(255, 255, 255),
-    TextHovered  = Color3.fromRGB(142, 142, 166),
-    TextInactive = Color3.fromRGB(106, 106, 126),
+    -- Text, read off the reference rather than carried over.
+    --
+    -- The original's idle grey is (106,106,126), which is dim enough that a
+    -- card of labels reads as disabled. In the reference the row labels are a
+    -- clearly legible light grey and only the genuinely secondary text - unit
+    -- suffixes, hints - drops below that. So TextInactive is lifted to where
+    -- those labels actually sit, and TextMuted is added underneath it for the
+    -- things that really are quiet.
+    TextActive   = Color3.fromRGB(245, 245, 250),
+    TextHovered  = Color3.fromRGB(215, 215, 225),
+    TextInactive = Color3.fromRGB(165, 165, 178),
+    TextMuted    = Color3.fromRGB(110, 110, 125),
 }
-
 ---------------------------------------------------------------------------------
 -- METRICS  (settings/elements.h + settings/variables.h, verbatim)
 ---------------------------------------------------------------------------------
 local M = {
-    -- 6, not the original 2. The reference menu rounds its window and every
-    -- card at about this radius, and it is the single biggest reason the two
-    -- look different at a glance: a 2px radius reads as a square box with the
-    -- corners knocked off, a 6px one reads as a rounded panel.
-    Rounding  = 6,
+    -- Three radii, not one.
+    --
+    -- Rounding used to be a single number applied to the window, the cards and
+    -- every control alike, which cannot be right: the radius that reads as a
+    -- softly rounded panel at 500px across turns a 14px checkbox into a circle.
+    -- The reference scales it down as the thing gets smaller, so this does too.
+    --
+    -- Rounding is the window, CardRounding the cards, CtrlRounding anything you
+    -- click - toggles, slider tracks, dropdown fields and their popups.
+    Rounding     = 6,
+    CardRounding = 4,
+    CtrlRounding = 3,
     AnimSpeed = 14,
 
     WindowW   = 650,
@@ -171,13 +186,21 @@ local M = {
     CpCircleR    = 4,
 }
 
----------------------------------------------------------------------------------
 -- TYPE
 --
--- The original is Tektur at 12 / 13 / 14 / 16 / 18. Tektur is not a Roblox font
--- family and cannot be added without uploading it, so Montserrat stands in -
--- the closest built-in geometric sans. Override Library.FontFamily with an
--- uploaded Tektur asset to make the port exact.
+-- BuilderSans, Roblox's own interface face: a neo-grotesque, so its letters are
+-- narrow and evenly weighted. The reference menu's font is the same kind of
+-- face, which is why this reads closer than Montserrat did - Montserrat is a
+-- geometric, with rounder bowls and wider caps, and at 12px in a dense card it
+-- takes noticeably more horizontal room per word.
+--
+-- Everything is set Bold and the hierarchy comes from colour instead: a white
+-- heading over grey rows. That is how the reference does it, and reserving
+-- weight for headings is what made the body text look thin beside it.
+--
+-- Type.init takes a chain, so Library.FontFamily is a preference rather than a
+-- bet - an uploaded face can be dropped in with one line and a bad value falls
+-- through to the next instead of dumping the menu into SourceSans.
 ---------------------------------------------------------------------------------
 local Type = { Family = nil, Faces = {}, Legacy = false }
 
@@ -197,12 +220,36 @@ function Type.build(family)
     return built
 end
 
+-- Families are tried in order and the first that builds wins.
+--
+-- The library used to take one family and drop straight to the legacy Enum.Font
+-- path if it failed, which is a long way to fall: a single wrong name and the
+-- whole menu renders in SourceSans. A chain means the preferred face is a
+-- preference rather than a bet.
+--
+-- BuilderSans first. It is Roblox's own interface font and a neo-grotesque, so
+-- its letterforms are narrow and even - which is what the reference menu's
+-- font looks like. Montserrat, which this used to use, is a geometric: rounder
+-- bowls, wider caps, noticeably more horizontal space per word. At 12px in a
+-- dense card that difference is most of why the text did not match.
+local TYPE_FAMILIES = {
+    "rbxasset://fonts/families/BuilderSans.json",
+    "rbxasset://fonts/families/Montserrat.json",
+}
+
 function Type.init(family)
-    local built = family and Type.build(family)
-    if built then
-        Type.Family, Type.Faces, Type.Legacy = family, built, false
-        return
+    local tried = {}
+    if family then tried[#tried + 1] = family end
+    for _, name in ipairs(TYPE_FAMILIES) do tried[#tried + 1] = name end
+
+    for _, name in ipairs(tried) do
+        local built = Type.build(name)
+        if built then
+            Type.Family, Type.Faces, Type.Legacy = name, built, false
+            return
+        end
     end
+
     -- Floor for clients without FontFace. Gotham is officially removed, so
     -- SourceSans - which has existed since the beginning - is the guarantee.
     Type.Legacy = true
@@ -214,10 +261,10 @@ function Type.init(family)
         return Enum.Font.SourceSans
     end
     Type.Faces = {
-        Regular  = pick("Gotham", "SourceSans"),
-        Medium   = pick("GothamMedium", "SourceSans"),
-        SemiBold = pick("GothamBold", "SourceSansSemibold", "SourceSansBold"),
-        Bold     = pick("GothamBlack", "SourceSansBold"),
+        Regular  = pick("BuilderSans", "Gotham", "SourceSans"),
+        Medium   = pick("BuilderSansMedium", "GothamMedium", "SourceSans"),
+        SemiBold = pick("BuilderSansBold", "GothamBold", "SourceSansSemibold"),
+        Bold     = pick("BuilderSansExtraBold", "GothamBlack", "SourceSansBold"),
     }
 end
 
@@ -561,7 +608,10 @@ end
 local Library = {
     Theme = Theme, Metrics = M, Util = Util, Type = Type, FS = fs, Anim = Anim,
 
-    FontFamily = "rbxasset://fonts/families/Montserrat.json",
+    -- Preferred face. Type.init tries this first, then its own chain, so
+    -- overriding it with an uploaded font is still a one-line change and a bad
+    -- value costs nothing but the fallback.
+    FontFamily = "rbxasset://fonts/families/BuilderSans.json",
 
     Toggles = {}, Options = {},
 
@@ -706,7 +756,14 @@ function Library:Label(parent, text, opts)
         AnchorPoint = opts.AnchorPoint or Vector2.new(),
         AutomaticSize = opts.AutoSize or Enum.AutomaticSize.None,
         ZIndex = opts.ZIndex or 2,
-        Weight = opts.Weight or "Medium",
+        -- Bold by default, not Medium.
+        --
+        -- Every label in the reference is heavy - row names, card headings,
+        -- tabs alike - and the hierarchy between them is carried by COLOUR: a
+        -- white heading over grey rows. Setting type at Medium and reserving
+        -- weight for headings is the other way of building the same hierarchy,
+        -- and it is the one that made the text look thin beside the reference.
+        Weight = opts.Weight or "Bold",
         Parent = parent,
     })
 end
@@ -1028,7 +1085,7 @@ function Library:CreateWindow(config)
     end)
 
     window.BrandLabel = self:Label(titlebar, window.Title, {
-        Color = Theme.TextActive, Size = 15, Weight = "SemiBold", Truncate = false,
+        Color = Theme.TextActive, Size = 15, Weight = "Bold", Truncate = false,
         AnchorPoint = Vector2.new(0, 0.5),
         Position = UDim2.new(0, brandPadX + avatarD + S(10), 0.5, 0),
         Size2 = UDim2.fromOffset(0, S(18)),
@@ -1126,7 +1183,7 @@ function Library:CreateWindow(config)
         Size = UDim2.new(0, S(M.ScrollW), 1, -S(M.ContentPad * 2)),
         Visible = false, ZIndex = 2, Parent = content,
     })
-    Util.Corner(window.ScrollTrack, S(M.Rounding))
+    Util.Corner(window.ScrollTrack, S(M.CtrlRounding))
 
     if config.AutoShow ~= false then
         task.defer(function()
@@ -1217,7 +1274,7 @@ function Window:AddTab(name, _icon)
     tab.Button = button
 
     tab.Label = library:Label(button, name, {
-        Weight = "SemiBold", Size = M.TabFontSize, Color = Theme.TextInactive,
+        Weight = "Bold", Size = M.TabFontSize, Color = Theme.TextInactive,
         XAlign = Enum.TextXAlignment.Center, Truncate = false,
         Size2 = UDim2.new(0, 0, 1, 0), AutoSize = Enum.AutomaticSize.X,
     })
@@ -1428,7 +1485,7 @@ function Tab:_NewCard(column)
         AutomaticSize = Enum.AutomaticSize.Y,
         LayoutOrder = #self.Cards + 1, Parent = column,
     })
-    Util.Corner(frame, S(M.Rounding))
+    Util.Corner(frame, S(M.CardRounding))
     Util.Stroke(frame, Theme.Dark27)
     Util.Pad(frame, S(10), S(10), S(12), S(12))
     Util.List(frame, S(2))
@@ -1440,12 +1497,16 @@ function Tab:_NewCard(column)
     -- the titlebar. Built here and filled in by SetTitle.
     box.TitleRow = Util.New("Frame", {
         Name = "Title", BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, S(20)),
+        Size = UDim2.new(1, 0, 0, S(24)),
         Visible = false, LayoutOrder = 0, Parent = frame,
     })
 
+    -- 14px against the rows' 14, but in TextActive rather than grey and a
+    -- weight heavier, which is how the reference separates a card's heading
+    -- from its contents - by colour and weight, not by size. Sizing it up as
+    -- well would make each card shout its own name.
     box.TitleLabel = library:Label(box.TitleRow, "", {
-        Color = Theme.TextActive, Size = 13, Weight = "SemiBold",
+        Color = Theme.TextActive, Size = 14, Weight = "Bold",
         Size2 = UDim2.new(1, 0, 1, 0),
     })
 
@@ -1558,7 +1619,7 @@ local function framedBox(parent, props)
     box.BackgroundColor3 = Theme.Dark33
     box.BorderSizePixel = 0
     box.Parent = props.Parent
-    Util.Corner(box, S(M.Rounding))
+    Util.Corner(box, S(M.CtrlRounding))
     Util.Stroke(box, Theme.Dark42)
     return box
 end
@@ -1607,28 +1668,38 @@ function Groupbox:_CreateToggle(index, options)
     local library = self.Library
     local row = self:_Row(M.CheckboxH)
 
+    -- Label left, box right.
+    --
+    -- The original puts the checkbox first and the name after it, reading like
+    -- a form. Every row in the reference reads the other way: the name owns the
+    -- left of the row and the control sits hard against the right edge, so a
+    -- card is a column of names with a column of states beside it and the eye
+    -- can run straight down either one. Addons - the gear, the colour swatch -
+    -- stack leftward from the box.
+    --
     -- No checkmark. The box simply fills: dark33 when off, accent when on. A
-    -- tick inside a 15px square is mostly noise at this size, and the fill
+    -- tick inside a 14px square is mostly noise at this size, and the fill
     -- already carries the state unambiguously.
     local box = Util.New("Frame", {
         Name = "Box", BackgroundColor3 = Theme.Dark33, BorderSizePixel = 0,
-        Position = UDim2.fromOffset(0, S(M.CheckboxPadY)),
+        AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, 0, 0.5, 0),
         Size = UDim2.fromOffset(S(M.CheckboxBox), S(M.CheckboxBox)),
         ZIndex = 2, Parent = row,
     })
-    Util.Corner(box, S(M.Rounding))
+    Util.Corner(box, S(M.CtrlRounding))
+    Util.Stroke(box, Theme.Dark42)
 
     local label = library:Label(row, options.Text or index, {
         Color = Theme.TextInactive,
-        Position = UDim2.fromOffset(S(M.CheckboxPadX + M.CheckboxBox), 0),
-        Size2 = UDim2.new(1, -S(M.CheckboxPadX + M.CheckboxBox + 40), 1, 0),
+        Size2 = UDim2.new(1, -S(M.CheckboxBox + 12), 1, 0),
         ZIndex = 2,
     })
 
     local hit = Util.New("TextButton", {
         Name = "Hit", Text = "", AutoButtonColor = false,
         BackgroundTransparency = 1, BorderSizePixel = 0,
-        Size = UDim2.new(1, -40, 0, S(M.CheckboxH)), ZIndex = 3, Parent = row,
+        Size = UDim2.new(1, 0, 0, S(M.CheckboxH)), ZIndex = 3, Parent = row,
     })
 
     local toggle = {
@@ -1734,7 +1805,7 @@ function Groupbox:AddSlider(index, options)
         Name = "Fill", BorderSizePixel = 0,
         Size = UDim2.fromScale(0, 1), ZIndex = 3, Parent = track,
     }), "BackgroundColor3")
-    Util.Corner(fill, S(M.Rounding))
+    Util.Corner(fill, S(M.CtrlRounding))
 
     local grab = Util.New("Frame", {
         Name = "Grab", BackgroundColor3 = Theme.White, BorderSizePixel = 0,
@@ -1743,7 +1814,7 @@ function Groupbox:AddSlider(index, options)
         Size = UDim2.fromOffset(S(M.GrabW), S(M.GrabH)),
         ZIndex = 4, Parent = track,
     })
-    Util.Corner(grab, S(M.Rounding))
+    Util.Corner(grab, S(M.CtrlRounding))
 
     -- The invisible drag target spans the whole row below the labels, matching
     -- the InvisibleButton of (width, total_y - y) in the original - a 5px track
@@ -1917,7 +1988,7 @@ function Groupbox:AddDropdown(index, options)
         Visible = false, ClipsDescendants = true, ZIndex = 50,
         Parent = library.PopupLayer,
     })
-    Util.Corner(popup, S(M.Rounding))
+    Util.Corner(popup, S(M.CtrlRounding))
     Util.Stroke(popup, Theme.Dark42)
 
     local list = Util.New("Frame", {
@@ -1944,21 +2015,30 @@ function Groupbox:AddDropdown(index, options)
         self._rows = {}
 
         for order, value in ipairs(self.Values) do
+            -- The selected option carries a fill, not just coloured text. In
+            -- the reference the current choice is a lighter band across the
+            -- full width of the list, which is what lets you find it in a long
+            -- list without reading any of it. Hover gets a weaker version of
+            -- the same band, so the two read as the same mechanism.
             local entry = Util.New("TextButton", {
                 Name = "Option", Text = "", AutoButtonColor = false,
+                BackgroundColor3 = Theme.Dark33,
                 BackgroundTransparency = 1, BorderSizePixel = 0,
                 Size = UDim2.new(1, 0, 0, S(M.SelectableH)),
                 LayoutOrder = order, ZIndex = 52, Parent = list,
             })
+            Util.Corner(entry, S(M.CtrlRounding))
 
             local text = library:Label(entry, tostring(value), {
                 Color = Theme.TextInactive, Size = 12,
-                Size2 = UDim2.fromScale(1, 1), ZIndex = 53,
+                Position = UDim2.fromOffset(S(8), 0),
+                Size2 = UDim2.new(1, -S(12), 1, 0), ZIndex = 53,
             })
 
             local record = {
                 Frame = entry, Label = text, Value = value,
                 Anim = Anim.track(text, "TextColor3", Theme.TextInactive),
+                Fill = Anim.track(entry, "BackgroundTransparency", 1),
             }
             self._rows[#self._rows + 1] = record
 
@@ -1992,6 +2072,8 @@ function Groupbox:AddDropdown(index, options)
                 or (self.Value == record.Value)
             Anim.set(record.Anim, selected and Theme.Accent
                 or (record.Hover and Theme.TextHovered or Theme.TextInactive))
+            Anim.set(record.Fill, selected and 0.25
+                or (record.Hover and 0.6 or 1))
         end
 
         Anim.set(self._TextAnim, self.IsOpen and Theme.TextActive
@@ -2658,7 +2740,7 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
         Size = UDim2.fromOffset(HK_W, HK_H),
         ZIndex = 1, Parent = panel,
     })
-    Util.Shadow(shadowHost, S(M.Rounding), 5, S(2))
+    Util.Shadow(shadowHost, S(M.CardRounding), 5, S(2))
 
     local body = Util.New("Frame", {
         -- Dark33 + Dark42: the same surface the dropdown and colour popups use,
@@ -2668,7 +2750,7 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
         Size = UDim2.fromOffset(HK_W, HK_H),
         ZIndex = 2, Parent = panel,
     })
-    Util.Corner(body, S(M.Rounding))
+    Util.Corner(body, S(M.CardRounding))
     Util.Stroke(body, Theme.Dark42)
     Util.Pad(body, HK_PAD, HK_PAD, HK_PAD, HK_PAD)
 
@@ -2699,7 +2781,7 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
         Position = UDim2.fromOffset(0, S(33)),
         Size = UDim2.new(1, 0, 0, S(28)), ZIndex = 3, Parent = body,
     })
-    Util.Corner(bindButton, S(M.Rounding))
+    Util.Corner(bindButton, S(M.CtrlRounding))
     local bindStroke = Util.Stroke(bindButton, Theme.Dark42)
 
     local bindLabel = library:Label(bindButton, "NONE", {
@@ -2741,7 +2823,7 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
         Position = UDim2.fromOffset(0, S(87)),
         Size = UDim2.new(1, 0, 0, S(22)), ZIndex = 3, Parent = body,
     })
-    Util.Corner(track, S(M.Rounding))
+    Util.Corner(track, S(M.CtrlRounding))
 
     local pill = Util.New("Frame", {
         Name = "Selection", BackgroundColor3 = Theme.Accent, BorderSizePixel = 0,
@@ -2749,7 +2831,7 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
         Size = UDim2.new(1 / #MODES, -S(4), 1, -S(4)),
         ZIndex = 2, Parent = track,
     })
-    Util.Corner(pill, S(M.Rounding))
+    Util.Corner(pill, S(M.CtrlRounding))
     library:Accent(pill)
 
     -- Driven as a cell index rather than a scale so the easing is in the same
@@ -2958,7 +3040,7 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
         Size = UDim2.fromOffset(popW, popH), Visible = false, ZIndex = 60,
         Parent = library.PopupLayer,
     })
-    Util.Corner(popup, S(M.Rounding))
+    Util.Corner(popup, S(M.CardRounding))
     Util.Stroke(popup, Theme.Dark42)
 
     local sv = Util.New("Frame", {
@@ -2966,7 +3048,7 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
         Position = UDim2.fromOffset(pad, pad),
         Size = UDim2.fromOffset(S(SV.X), S(SV.Y)), ZIndex = 61, Parent = popup,
     })
-    Util.Corner(sv, S(M.Rounding))
+    Util.Corner(sv, S(M.CtrlRounding))
     local svHue = Util.New("UIGradient", {
         Color = ColorSequence.new(Theme.White, Color3.fromHSV(0, 1, 1)), Parent = sv,
     })
@@ -2974,7 +3056,7 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
         BackgroundColor3 = Theme.Black, BorderSizePixel = 0,
         Size = UDim2.fromScale(1, 1), ZIndex = 62, Parent = sv,
     })
-    Util.Corner(shade, S(M.Rounding))
+    Util.Corner(shade, S(M.CtrlRounding))
     Util.New("UIGradient", {
         Rotation = 90,
         Transparency = NumberSequence.new({
@@ -3000,7 +3082,7 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
         Size = UDim2.fromOffset(popW - (pad * 3) - S(SV.X), S(SV.Y)),
         ZIndex = 61, Parent = popup,
     })
-    Util.Corner(hueBar, S(M.Rounding))
+    Util.Corner(hueBar, S(M.CtrlRounding))
     Util.New("UIGradient", {
         Rotation = 90,
         Color = ColorSequence.new({
@@ -3020,7 +3102,7 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
         Size = UDim2.fromOffset(S(M.CpGrabH), S(M.CpGrabW)),
         ZIndex = 63, Parent = hueBar,
     })
-    Util.Corner(hueGrab, S(M.Rounding))
+    Util.Corner(hueGrab, S(M.CtrlRounding))
 
     local alphaBar, alphaRamp, alphaGrab
     if picker.HasAlpha then
@@ -3030,12 +3112,12 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
             Size = UDim2.fromOffset(S(SV.X), S(M.CpBarH * 2)),
             ZIndex = 61, Parent = popup,
         })
-        Util.Corner(alphaBar, S(M.Rounding))
+        Util.Corner(alphaBar, S(M.CtrlRounding))
         alphaRamp = Util.New("Frame", {
             BackgroundColor3 = picker.Value, BorderSizePixel = 0,
             Size = UDim2.fromScale(1, 1), ZIndex = 62, Parent = alphaBar,
         })
-        Util.Corner(alphaRamp, S(M.Rounding))
+        Util.Corner(alphaRamp, S(M.CtrlRounding))
         Util.New("UIGradient", {
             Transparency = NumberSequence.new({
                 NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0),
@@ -3048,7 +3130,7 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
             Size = UDim2.fromOffset(S(M.CpGrabW), S(M.CpGrabH)),
             ZIndex = 63, Parent = alphaBar,
         })
-        Util.Corner(alphaGrab, S(M.Rounding))
+        Util.Corner(alphaGrab, S(M.CtrlRounding))
     end
 
     local hexBox = Util.New("TextBox", {
@@ -3061,7 +3143,7 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
         Size = UDim2.new(1, -pad * 2, 0, S(18)),
         ZIndex = 62, Weight = "Medium", Parent = popup,
     })
-    Util.Corner(hexBox, S(M.Rounding))
+    Util.Corner(hexBox, S(M.CtrlRounding))
     Util.Stroke(hexBox, Theme.Dark42)
 
     function picker:_Repaint()
@@ -3212,7 +3294,9 @@ end
 -- hotkey width) when a colour button is present.
 ---------------------------------------------------------------------------------
 local function RelayoutAddons(toggle)
-    local offset = 0
+    -- Addons stack leftward from the box, which now owns the right edge, so
+    -- every offset starts past the box instead of at zero.
+    local offset = S(M.CheckboxBox) + S(M.CheckboxPadX)
 
     local swatches = {}
     for _, addon in ipairs(toggle.Addons) do
@@ -3230,8 +3314,8 @@ local function RelayoutAddons(toggle)
     end
 
     if toggle._Label then
-        local reserve = offset + S(10)
-        toggle._Label.Size = UDim2.new(1, -(S(M.CheckboxPadX + M.CheckboxBox) + reserve), 1, 0)
+        local reserve = offset + S(8)
+        toggle._Label.Size = UDim2.new(1, -reserve, 1, 0)
         toggle._Hit.Size = UDim2.new(1, -reserve, 0, S(M.CheckboxH))
     end
 end
@@ -3324,6 +3408,14 @@ function Tab:_EnsureSubStrip()
     -- The scroll stops short of the row, or the last card sits under it.
     self.Page.Size = UDim2.new(1, 0, 1, -S(26))
 
+    -- The tab's OWN pair of columns goes away the moment it has subtabs, and
+    -- this is what was breaking them: those columns are fixed to half the
+    -- content width each whether or not anything is in them, so two empty ones
+    -- sat there holding the full width and pushed every subtab column off the
+    -- right-hand edge. A tab with subtabs puts its cards on the subtabs, so its
+    -- own pair has nothing left to do.
+    self.Left.Visible, self.Right.Visible = false, false
+
     return self.SubStrip
 end
 
@@ -3348,7 +3440,7 @@ function Tab:AddSubTab(name)
     sub.Button = button
 
     sub.Label = library:Label(button, name, {
-        Weight = "SemiBold", Size = 13, Color = Theme.TextInactive,
+        Weight = "Bold", Size = 13, Color = Theme.TextInactive,
         XAlign = Enum.TextXAlignment.Center, Truncate = false,
         Size2 = UDim2.new(0, 0, 1, 0), AutoSize = Enum.AutomaticSize.X,
     })
@@ -3479,7 +3571,7 @@ function Library:SetWatermarkBlocks(blocks)
         AutomaticSize = Enum.AutomaticSize.XY,
         ZIndex = 4000, Parent = self.ScreenGui,
     })
-    Util.Corner(bar, S(M.Rounding))
+    Util.Corner(bar, S(M.CardRounding))
     Util.Pad(bar, S(3), S(3), S(3), S(3))
     Util.List(bar, S(8), Enum.FillDirection.Horizontal)
     self.Watermark = bar
@@ -3494,7 +3586,7 @@ function Library:SetWatermarkBlocks(blocks)
             AutomaticSize = Enum.AutomaticSize.XY,
             LayoutOrder = order, Parent = bar,
         })
-        Util.Corner(cell, S(M.Rounding))
+        Util.Corner(cell, S(M.CtrlRounding))
         Util.Pad(cell, S(10), S(10), S(15), S(15))
         Util.List(cell, 0, Enum.FillDirection.Horizontal)
 
@@ -3844,7 +3936,7 @@ function Library:Notify(text, duration, title)
         AutomaticSize = Enum.AutomaticSize.XY,
         Parent = layer,
     })
-    Util.Corner(card, S(M.Rounding))
+    Util.Corner(card, S(M.CardRounding))
     Util.Pad(card, pad, pad, pad, pad)
     Util.List(card, pad)
 
@@ -3860,13 +3952,13 @@ function Library:Notify(text, duration, title)
         BorderSizePixel = 0,
         Size = UDim2.new(1, 0, 0, S(M.CpBarH)), LayoutOrder = 2, Parent = card,
     })
-    Util.Corner(rail, S(M.Rounding))
+    Util.Corner(rail, S(M.CtrlRounding))
 
     local fill = self:Accent(Util.New("Frame", {
         BorderSizePixel = 0, BackgroundTransparency = 1,
         Size = UDim2.fromScale(0, 1), Parent = rail,
     }), "BackgroundColor3")
-    Util.Corner(fill, S(M.Rounding))
+    Util.Corner(fill, S(M.CtrlRounding))
 
     local function fade(to)
         for _, inst in ipairs({ card, rail, fill }) do
@@ -3952,7 +4044,7 @@ function Library:_CreateKeybindList()
         Size = UDim2.fromOffset(W, height),
         ZIndex = 1, Parent = holder,
     })
-    Util.Shadow(shadowHost, S(M.Rounding), 5, S(2))
+    Util.Shadow(shadowHost, S(M.CardRounding), 5, S(2))
 
     local body = Util.New("Frame", {
         Name = "Body", BackgroundColor3 = Theme.Dark18, BorderSizePixel = 0,
@@ -3960,7 +4052,7 @@ function Library:_CreateKeybindList()
         Size = UDim2.fromOffset(W, height),
         ClipsDescendants = true, ZIndex = 2, Parent = holder,
     })
-    Util.Corner(body, S(M.Rounding))
+    Util.Corner(body, S(M.CardRounding))
     Util.Stroke(body, Theme.Dark34)
     Util.Pad(body, S(KB_PAD), S(KB_PAD), S(KB_PAD), S(KB_PAD))
 
@@ -4063,7 +4155,7 @@ function Library:_CreateKeybindList()
             Size = UDim2.fromOffset(0, S(16)),
             AutomaticSize = Enum.AutomaticSize.X, ZIndex = 5, Parent = row,
         })
-        Util.Corner(chip, S(M.Rounding))
+        Util.Corner(chip, S(M.CtrlRounding))
         Util.Pad(chip, 0, 0, S(6), S(6))
         local chipStroke = Util.Stroke(chip, Theme.Dark42)
 
