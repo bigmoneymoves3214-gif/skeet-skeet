@@ -64,11 +64,11 @@ local LocalPlayer = Players.LocalPlayer
 -- PALETTE  (settings/colors.h, verbatim)
 ---------------------------------------------------------------------------------
 local Theme = {
-    -- The original ships accent 100,150,255. White instead: in a strictly
-    -- black-and-white menu the only "colour" available is contrast, so the
-    -- accent is maximum contrast and everything idle is grey. Set
-    -- Library:SetAccent(c) to put a hue back.
-    Accent = Color3.fromRGB(255, 255, 255),
+    -- Periwinkle. Everything idle is grey, so the accent is the only hue in the
+    -- menu and it marks exactly one thing: what is on, or where you are. Set
+    -- Library:SetAccent(c) to change it - every surface that uses it registers,
+    -- so it updates live rather than needing a reload.
+    Accent = Color3.fromRGB(139, 139, 216),
     White  = Color3.fromRGB(255, 255, 255),
     Black  = Color3.fromRGB(0, 0, 0),
 
@@ -971,46 +971,69 @@ function Library:CreateWindow(config)
     Util.Corner(titlebar, wr)
     self:Draggable(titlebar, { root })
 
-    -- Triple grip: dark18, left corners rounded only. UICorner cannot round two
-    -- corners, so a square patch the width of the radius squares off the right.
-    local triple = Util.New("Frame", {
-        Name = "Grip", BackgroundColor3 = Theme.Dark18, BorderSizePixel = 0,
-        Size = UDim2.fromOffset(S(M.TripleW), barH), ZIndex = 2, Parent = titlebar,
+    -----------------------------------------------------------------
+    -- Branding: your avatar, then the name.
+    --
+    -- The three-dot grip the original had is gone. It was a drag affordance for
+    -- a bar that is already draggable along its whole length, so it only ever
+    -- marked the corner - and the corner is better spent saying whose menu
+    -- this is.
+    --
+    -- The avatar is fetched from the thumbnail service rather than hardcoded,
+    -- in a pcall and on its own thread: it is a web request, it can fail or be
+    -- slow, and a menu that blocks on a picture looks broken on a cold join.
+    -- The circle is drawn either way and fills in when the image arrives.
+    -----------------------------------------------------------------
+    local brandPadX = S(16)
+    local avatarD   = S(26)
+
+    local avatar = Util.New("ImageLabel", {
+        Name = "Avatar", BackgroundColor3 = Theme.Dark27, BorderSizePixel = 0,
+        AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, brandPadX, 0.5, 0),
+        Size = UDim2.fromOffset(avatarD, avatarD),
+        Image = "", ZIndex = 3, Parent = titlebar,
     })
-    Util.Corner(triple, wr)
-    Util.New("Frame", {
-        BackgroundColor3 = Theme.Dark18, BorderSizePixel = 0,
-        Position = UDim2.new(1, -wr, 0, 0),
-        Size = UDim2.fromOffset(wr, barH), ZIndex = 2, Parent = triple,
+    Util.Corner(avatar, math.floor(avatarD / 2))
+    Util.Stroke(avatar, Theme.Dark42)
+    window.Avatar = avatar
+
+    task.spawn(function()
+        pcall(function()
+            local players = game:GetService("Players")
+            local me = players.LocalPlayer
+            if not me then return end
+            local url = players:GetUserThumbnailAsync(
+                me.UserId,
+                Enum.ThumbnailType.HeadShot,
+                Enum.ThumbnailSize.Size100x100)
+            if url and avatar.Parent then avatar.Image = url end
+        end)
+    end)
+
+    window.BrandLabel = self:Label(titlebar, window.Title, {
+        Color = Theme.TextActive, Size = 15, Weight = "SemiBold", Truncate = false,
+        AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, brandPadX + avatarD + S(10), 0.5, 0),
+        Size2 = UDim2.fromOffset(0, S(18)),
+        AutoSize = Enum.AutomaticSize.X, ZIndex = 3,
     })
 
-    for _, dy in ipairs({ -7, 0, 7 }) do
-        local dot = Util.New("Frame", {
-            BackgroundColor3 = Theme.White, BorderSizePixel = 0,
-            AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.new(0.5, 0, 0.5, S(dy)),
-            Size = UDim2.fromOffset(S(4), S(4)), ZIndex = 3, Parent = triple,
-        })
-        Util.Corner(dot, S(2))
-    end
-
-    -- dummy_line: a 16px vertical rule centred in a 50px gap, so it lands at
-    -- x = 25 + 25 = 50 and the tabs start at 75.
-    Util.New("Frame", {
-        Name = "GripDivider", BackgroundColor3 = Theme.Dark34, BorderSizePixel = 0,
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.new(0, S(M.TripleW + M.TabsLineGap / 2), 0.5, 0),
-        Size = UDim2.fromOffset(1, S(16)), ZIndex = 2, Parent = titlebar,
-    })
-
+    -- Right-aligned. The branding owns the left of the bar, so the tabs run to
+    -- the right edge and grow leftward as they are added - which also means the
+    -- tab you are on never moves when a later one is added.
     window.TabStrip = Util.New("Frame", {
         Name = "Tabs", BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(S(M.TripleW + M.TabsLineGap), 0),
-        -- A right margin, or the last tab butts against the window edge.
-        Size = UDim2.new(1, -S(M.TripleW + M.TabsLineGap + 16), 1, 0),
+        AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.new(1, -S(20), 0, 0),
+        -- Starts after the branding so auto-fit measures the space it really
+        -- has, not the whole bar.
+        Size = UDim2.new(1, -S(16 + 26 + 10 + 140), 1, 0),
         ZIndex = 2, Parent = titlebar,
     })
-    window.TabLayout = Util.List(window.TabStrip, S(M.TabSpacing), Enum.FillDirection.Horizontal)
+    window.TabLayout = Util.List(
+        window.TabStrip, S(M.TabSpacing),
+        Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Right)
 
     -----------------------------------------------------------------
     -- Tab auto-fit
@@ -1181,6 +1204,35 @@ function Window:AddTab(name, _icon)
     })
     tab.LabelAnim = Anim.track(tab.Label, "TextColor3", Theme.TextInactive)
 
+    -- The glow under the active tab.
+    --
+    -- A 2px accent bar whose gradient runs transparent at both ends and opaque
+    -- in the middle, so it reads as light bleeding out from under the tab
+    -- rather than an underline with two hard stops. UIGradient.Transparency
+    -- takes a NumberSequence, which is the only way to fade a frame along an
+    -- axis without stacking parts.
+    --
+    -- Eased rather than switched, so changing tabs fades one out while the next
+    -- comes up instead of jumping between them.
+    tab.Glow = Util.New("Frame", {
+        Name = "Glow", BackgroundColor3 = Theme.Accent, BorderSizePixel = 0,
+        AnchorPoint = Vector2.new(0.5, 1),
+        Position = UDim2.new(0.5, 0, 1, -S(12)),
+        Size = UDim2.new(1, S(18), 0, S(2)),
+        BackgroundTransparency = 1,
+        ZIndex = 2, Parent = button,
+    })
+    library:Accent(tab.Glow)
+    Util.New("UIGradient", {
+        Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 1),
+            NumberSequenceKeypoint.new(0.5, 0),
+            NumberSequenceKeypoint.new(1, 1),
+        }),
+        Parent = tab.Glow,
+    })
+    tab.GlowAnim = Anim.track(tab.Glow, "BackgroundTransparency", 1)
+
     -----------------------------------------------------------------
     -- Page: two columns inside one scrolling region, exactly as
     -- gui.cpp does with begin_group / sameline / begin_group.
@@ -1244,11 +1296,18 @@ function Window:AddTab(name, _icon)
     tab.Left  = column(1)
     tab.Right = column(2)
 
+    -- Exposed so subtabs can make more of the same, and tracked in one list so
+    -- the width easing below resizes every column rather than only the first
+    -- pair. A subtab is just another pair hidden until it is selected.
+    tab._Column  = column
+    tab._Columns = { tab.Left, tab.Right }
+    tab.Columns  = tab._Columns
+
     -- init_child_anim: the width eases rather than snapping when the scrollbar
     -- appears, so the content does not jump sideways the moment a card grows.
     tab.WidthAnim = Scalar.track(columnWidth(false), function(value)
         local width = UDim2.fromOffset(math.floor(value), 0)
-        tab.Left.Size, tab.Right.Size = width, width
+        for _, col in ipairs(tab._Columns) do col.Size = width end
     end)
 
     library:Watch(function()
@@ -1293,6 +1352,7 @@ function Tab:_Repaint()
     Anim.set(self.LabelAnim,
         active and Theme.Accent
         or (hovered and Theme.TextHovered or Theme.TextInactive))
+    Anim.set(self.GlowAnim, active and 0 or 1)
 end
 
 function Window:SetActiveTab(tab)
@@ -3156,6 +3216,176 @@ function Groupbox:AddColorPicker(index, options)
 end
 
 ---------------------------------------------------------------------------------
+-- SUBTABS
+--
+-- A second level of navigation inside one tab, drawn as a row along the bottom
+-- right of the content panel - the mirror of the tab strip along the top right,
+-- so both levels read as the same mechanism at different scales.
+--
+-- Entirely opt-in. A tab with no subtabs has no row and behaves exactly as it
+-- did, so nothing existing has to change; the row appears the first time a tab
+-- is asked for a subtab, and the first one added becomes the active one.
+--
+-- A subtab is not a new page. It is another pair of columns in the SAME scroll,
+-- hidden unless selected - which is why it needs no layout of its own, inherits
+-- the width easing for free, and cannot drift out of step with the tab's own
+-- padding and spacing. A UIListLayout skips invisible children, so the hidden
+-- pairs take up no room.
+---------------------------------------------------------------------------------
+local SubTab = {}
+SubTab.__index = SubTab
+
+function Tab:_EnsureSubStrip()
+    if self.SubStrip then return self.SubStrip end
+
+    -- Parented to Wrap rather than the scroll, so it stays put while the page
+    -- scrolls underneath it.
+    self.SubStrip = Util.New("Frame", {
+        Name = "SubTabs", BackgroundTransparency = 1,
+        AnchorPoint = Vector2.new(1, 1),
+        Position = UDim2.new(1, -S(18), 1, -S(6)),
+        Size = UDim2.fromOffset(0, S(20)),
+        AutomaticSize = Enum.AutomaticSize.X,
+        Visible = false, ZIndex = 40, Parent = self.Wrap,
+    })
+    Util.New("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        VerticalAlignment = Enum.VerticalAlignment.Center,
+        HorizontalAlignment = Enum.HorizontalAlignment.Right,
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Padding = UDim.new(0, S(M.TabSpacing)),
+        Parent = self.SubStrip,
+    })
+
+    -- The scroll stops short of the row, or the last card sits under it.
+    self.Page.Size = UDim2.new(1, 0, 1, -S(26))
+
+    return self.SubStrip
+end
+
+function Tab:AddSubTab(name)
+    local library = self.Library
+    local strip = self:_EnsureSubStrip()
+
+    self.SubTabs = self.SubTabs or {}
+    local index = #self.SubTabs + 1
+
+    local sub = setmetatable({
+        Library = library, Tab = self, Name = name, Index = index,
+    }, SubTab)
+
+    local button = Util.New("TextButton", {
+        Name = "SubTab" .. index, Text = "", AutoButtonColor = false,
+        BackgroundTransparency = 1, BorderSizePixel = 0,
+        Size = UDim2.new(0, 0, 1, 0),
+        AutomaticSize = Enum.AutomaticSize.X,
+        LayoutOrder = index, Parent = strip,
+    })
+    sub.Button = button
+
+    sub.Label = library:Label(button, name, {
+        Weight = "SemiBold", Size = 13, Color = Theme.TextInactive,
+        XAlign = Enum.TextXAlignment.Center, Truncate = false,
+        Size2 = UDim2.new(0, 0, 1, 0), AutoSize = Enum.AutomaticSize.X,
+    })
+    sub.LabelAnim = Anim.track(sub.Label, "TextColor3", Theme.TextInactive)
+
+    -- The same glow as the top strip, mirrored above the label: this row sits
+    -- on the bottom edge, and a glow below it would be half off the panel.
+    sub.Glow = Util.New("Frame", {
+        Name = "Glow", BackgroundColor3 = Theme.Accent, BorderSizePixel = 0,
+        AnchorPoint = Vector2.new(0.5, 0),
+        Position = UDim2.new(0.5, 0, 0, -S(3)),
+        Size = UDim2.new(1, S(18), 0, S(2)),
+        BackgroundTransparency = 1,
+        ZIndex = 2, Parent = button,
+    })
+    library:Accent(sub.Glow)
+    Util.New("UIGradient", {
+        Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 1),
+            NumberSequenceKeypoint.new(0.5, 0),
+            NumberSequenceKeypoint.new(1, 1),
+        }),
+        Parent = sub.Glow,
+    })
+    sub.GlowAnim = Anim.track(sub.Glow, "BackgroundTransparency", 1)
+
+    -- Another pair of columns in the tab's own scroll. Ordered after every pair
+    -- already there so the layout keeps them together.
+    local base = #self._Columns
+    sub.Left  = self._Column(base + 1)
+    sub.Right = self._Column(base + 2)
+    sub.Left.Visible, sub.Right.Visible = false, false
+    self._Columns[#self._Columns + 1] = sub.Left
+    self._Columns[#self._Columns + 1] = sub.Right
+
+    local hovered = false
+    library:Watch(function(point)
+        if not button.Parent then return false end
+        local over = Util.PointInside(button, point) and library.Open
+        if over ~= hovered then
+            hovered = over
+            sub:_Repaint()
+        end
+    end)
+    sub._Hovered = function() return hovered end
+
+    library:Connect(button.MouseButton1Click, function()
+        if library:AnyPopupOpen() then return end
+        self:SetActiveSubTab(sub)
+    end)
+
+    self.SubTabs[index] = sub
+    strip.Visible = true
+
+    if not self.ActiveSubTab then self:SetActiveSubTab(sub) end
+    return sub
+end
+
+function SubTab:_Repaint()
+    local active = self.Tab.ActiveSubTab == self
+    local hovered = self._Hovered and self._Hovered() or false
+    Anim.set(self.LabelAnim,
+        active and Theme.Accent
+        or (hovered and Theme.TextHovered or Theme.TextInactive))
+    Anim.set(self.GlowAnim, active and 0 or 1)
+end
+
+function Tab:SetActiveSubTab(sub)
+    if self.ActiveSubTab == sub then return end
+
+    local previous = self.ActiveSubTab
+    self.ActiveSubTab = sub
+
+    if previous then
+        previous.Left.Visible, previous.Right.Visible = false, false
+        previous:_Repaint()
+    end
+
+    sub.Left.Visible, sub.Right.Visible = true, true
+    sub:_Repaint()
+
+    -- Back to the top: the new pair's content has nothing to do with how far
+    -- down the old one you were.
+    pcall(function() self.Page.CanvasPosition = Vector2.new() end)
+end
+
+function SubTab:AddLeftGroupbox(name)
+    local box = self.Tab:_NewCard(self.Left)
+    if name then box.Frame.Name = tostring(name) end
+    return box
+end
+
+function SubTab:AddRightGroupbox(name)
+    local box = self.Tab:_NewCard(self.Right)
+    if name then box.Frame.Name = tostring(name) end
+    return box
+end
+
+Library.SubTabClass = SubTab
+
+---------------------------------------------------------------------------------
 -- WATERMARK  (watermark.cpp)
 --
 -- A dark14 strip of dark18 blocks, 3px padding, 8px between them. Each block is
@@ -4359,9 +4589,11 @@ function SaveManager:BuildConfigSection(tab, options)
         library:Unload()
     end })
 
-    self:SetIgnoreIndexes({
-        "MenuKey", "MenuAccent", "MenuKeybindList", "MenuTopbar", "MenuAnimSpeed",
-    })
+    -- Nothing ignored here any more. These were excluded on the theory that
+    -- menu appearance is not part of a loadout, but they are the settings you
+    -- set once and expect to stay set - the menu key above all - and leaving
+    -- them out meant a config could never record them, so every load silently
+    -- put the menu key, the accent and the keybind list back to defaults.
 
     return self
 end
