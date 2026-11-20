@@ -159,9 +159,19 @@ local M = {
     GrabW        = 5,
     GrabH        = 10,
 
+    -- The heading band is the card's whole top strip, so its height is the
+    -- card's, not a row's. Its type is a step ABOVE the row size below it:
+    -- the reference sets the card name apart by size, not just by the band.
+    CardTitleH    = 30,
+    CardTitleSize = 15,
+
     ComboH       = 42,
     ComboBoxW    = 90,
     ComboBoxH    = 22,
+    -- The name sits above the field with real air between them; at 2px they
+    -- read as one object and the name looks like it is inside the box.
+    ComboLabelH   = 16,
+    ComboLabelGap = 6,
     ComboPad     = 5,
     ComboFrameX  = 8,
     ComboFrameY  = 6,
@@ -1524,33 +1534,35 @@ function Tab:_NewCard(column)
     })
     Util.Corner(frame, S(M.CardRounding))
     Util.Stroke(frame, Theme.Dark27)
-    Util.Pad(frame, S(10), S(10), S(12), S(12))
-    Util.List(frame, S(2))
+    -- The card itself holds exactly two things, stacked and flush: the heading
+    -- band and the body. It carries NO padding of its own, because the band has
+    -- to reach the card's edges - the padding belongs to the body below.
+    Util.List(frame, 0)
     box.Frame = frame
 
-    -- Every card carries a heading. The old builder took a name and used it
-    -- A filled header BAND, not a line of text with a rule under it.
+    -- THE HEADING IS THE CARD'S ENTIRE TOP STRIP: a lighter band running the
+    -- full width, corner to corner, with the title sitting in it and the dark
+    -- body below. Not a stripe floating inside the card with card fill showing
+    -- around it - that is what this was, and it was wrong.
     --
-    -- This is what the sketch shows: a lighter strip running the full width of
-    -- the card with the title sitting in it, and the card body dark below. The
-    -- previous attempt drew the title on the card's own fill and divided it
-    -- with a hairline, which is a different thing - the heading has its own
-    -- surface here, and that surface is what you see first.
-    --
-    -- It is pulled out to both walls because the card pads its children by 12 a
-    -- side, and extended up by the card's top padding so it meets the card's
-    -- own edge with nothing showing above it.
+    -- WHY IT WAS WRONG, because it is not obvious from reading the old code: the
+    -- band was a child of the card, the card had a UIListLayout, and a
+    -- UIListLayout POSITIONS its children. The negative Position meant to pull
+    -- the band out to the card's edges was simply discarded, so it rendered as
+    -- an ordinary row - inset by the card's 12px side padding and sitting below
+    -- its 10px top padding. No offset could have fixed that; the band has to be
+    -- outside the padded region altogether, which is why the body is now its own
+    -- frame and the padding moved onto it.
     box.TitleRow = Util.New("Frame", {
         Name = "Title", BackgroundColor3 = Theme.Dark33, BorderSizePixel = 0,
-        Position = UDim2.new(0, -S(12), 0, -S(10)),
-        Size = UDim2.new(1, S(24), 0, S(28)),
-        Visible = false, LayoutOrder = 0, Parent = frame,
+        Size = UDim2.new(1, 0, 0, S(M.CardTitleH)),
+        Visible = false, LayoutOrder = 1, Parent = frame,
     })
     Util.Corner(box.TitleRow, S(M.CardRounding))
 
     -- UICorner rounds all four, and only the top two should be: the band meets
-    -- the card body below it on a straight edge. A patch the height of the
-    -- radius squares the bottom off again.
+    -- the body below it on a straight edge. A patch the height of the radius
+    -- squares the bottom off again.
     Util.New("Frame", {
         Name = "TitleFoot", BackgroundColor3 = Theme.Dark33, BorderSizePixel = 0,
         AnchorPoint = Vector2.new(0, 1),
@@ -1560,24 +1572,27 @@ function Tab:_NewCard(column)
     })
 
     box.TitleLabel = library:Label(box.TitleRow, "", {
-        Color = Theme.TextActive, Size = 13, Weight = "Bold",
+        Color = Theme.TextActive, Size = M.CardTitleSize, Weight = "Bold",
         Position = UDim2.fromOffset(S(12), 0),
         Size2 = UDim2.new(1, -S(24), 1, 0), ZIndex = 2,
     })
 
-    -- A spacer in the layout the band's real height, since the band itself is
-    -- pulled out of position and cannot reserve its own room.
-    box.TitleSpacer = Util.New("Frame", {
-        Name = "TitleSpace", BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, S(22)),
-        Visible = false, LayoutOrder = 0, Parent = frame,
+    -- The body. Everything that is not the heading lives here, and this is what
+    -- carries the padding the card used to.
+    local body = Util.New("Frame", {
+        Name = "Body", BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        LayoutOrder = 2, Parent = frame,
     })
+    Util.Pad(body, S(10), S(10), S(12), S(12))
+    Util.List(body, S(2))
+    box.Body = body
 
     function box:SetTitle(text)
         text = text and tostring(text) or ""
         self.TitleLabel.Text = text
         self.TitleRow.Visible = text ~= ""
-        self.TitleSpacer.Visible = text ~= ""
     end
 
     self.Cards[#self.Cards + 1] = box
@@ -1619,7 +1634,7 @@ function Groupbox:_Row(height, noSeparator)
     local row = Util.New("Frame", {
         Name = "Row", BackgroundTransparency = 1,
         Size = UDim2.new(1, 0, 0, S(height)),
-        LayoutOrder = self.Order, Parent = self.Frame,
+        LayoutOrder = self.Order, Parent = self.Body,
     })
     self.Rows[#self.Rows + 1] = row
 
@@ -1646,29 +1661,33 @@ end
 -- SHARED PIECES
 ---------------------------------------------------------------------------------
 
--- The combo's trailing glyph is a tiny double arrow, built from rotated bars
+-- The combo's trailing glyph: ONE down chevron, built from two rotated bars
 -- rather than a font glyph (an arrow character is absent from most families and
 -- would render as a box).
 --
+-- It used to be a stacked pair - an up chevron above a down one, the way a
+-- spinner is drawn - and at this size the two merged into something that read
+-- as a caret pointing up. A dropdown opens downward, so it gets one arrow
+-- pointing that way and nothing else.
+--
 -- Rotation direction matters and is easy to get backwards: a horizontal bar at
--- +45 runs DOWN to the right. So an up chevron needs -45 on its left half and
--- +45 on its right half. Reversed, the two halves meet at the wrong ends and
--- the pair renders as an X - which is exactly what it was doing.
+-- +45 runs DOWN to the right, so the DOWN chevron is +45 on its left half and
+-- -45 on its right. Reversed, the halves meet at the wrong ends and render
+-- as an X.
 local function comboArrow(parent, x)
     local holder = Util.New("Frame", {
         Name = "Arrow", BackgroundTransparency = 1,
         AnchorPoint = Vector2.new(1, 0.5),
         Position = UDim2.new(1, -S(x or 8), 0.5, 0),
-        Size = UDim2.fromOffset(S(8), S(12)), ZIndex = 3, Parent = parent,
+        Size = UDim2.fromOffset(S(8), S(8)), ZIndex = 3, Parent = parent,
     })
     for _, spec in ipairs({
-        { 0.22, -45, -3 }, { 0.78, 45, -3 },   -- up chevron, sitting high
-        { 0.22, 45, 3 },   { 0.78, -45, 3 },   -- down chevron, sitting low
+        { 0.22, 45 }, { 0.78, -45 },
     }) do
         Util.New("Frame", {
             BackgroundColor3 = Theme.TextInactive, BorderSizePixel = 0,
             AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.new(spec[1], 0, 0.5, S(spec[3])),
+            Position = UDim2.new(spec[1], 0, 0.5, 0),
             Size = UDim2.fromOffset(S(5), math.max(1, S(1))),
             Rotation = spec[2], Parent = holder,
         })
@@ -2003,17 +2022,17 @@ function Groupbox:AddDropdown(index, options)
     -- what lets the open list line up with the field edge-to-edge instead of
     -- hanging off one end of the row - and gives long option names somewhere
     -- to go. The row is taller to pay for it.
-    local row = self:_Row(M.ComboH + 16)
+    local row = self:_Row(M.ComboLabelH + M.ComboLabelGap + M.ComboBoxH + 6)
 
     local label = library:Label(row, options.Text or index, {
         Color = Theme.TextInactive, Size = 12,
-        Size2 = UDim2.new(1, 0, 0, S(16)),
+        Size2 = UDim2.new(1, 0, 0, S(M.ComboLabelH)),
     })
 
     local box = framedBox(row, {
         Name = "Box",
-        Position = UDim2.fromOffset(0, S(18)),
-        Size = UDim2.new(1, 0, 0, S(M.ComboBoxH + 2)),
+        Position = UDim2.fromOffset(0, S(M.ComboLabelH + M.ComboLabelGap)),
+        Size = UDim2.new(1, 0, 0, S(M.ComboBoxH)),
         ZIndex = 2, Parent = row,
     })
 
