@@ -4916,11 +4916,6 @@ function SaveManager:BuildConfigSection(tab, options)
         say(ok, detail, "Deleted " .. tostring(detail))
     end })
 
-    left:AddButton({ Text = "Refresh list", Func = function()
-        refresh(nameBox.Value ~= "" and nameBox.Value or nil)
-        library:Notify("Config list refreshed", 2)
-    end })
-
     self._autoloadLabel = left:AddLabel("Autoload: none")
 
     left:AddButton({ Text = "Set autoload", Func = function()
