@@ -1497,17 +1497,31 @@ function Tab:_NewCard(column)
     -- the titlebar. Built here and filled in by SetTitle.
     box.TitleRow = Util.New("Frame", {
         Name = "Title", BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, S(24)),
+        Size = UDim2.new(1, 0, 0, S(26)),
         Visible = false, LayoutOrder = 0, Parent = frame,
     })
 
-    -- 14px against the rows' 14, but in TextActive rather than grey and a
-    -- weight heavier, which is how the reference separates a card's heading
-    -- from its contents - by colour and weight, not by size. Sizing it up as
-    -- well would make each card shout its own name.
+    -- Same size as the rows below it, white rather than grey. In the reference
+    -- the heading is not a bigger word, it is a brighter one - "Kill Effects"
+    -- over "Kill Effects" reads as a title purely because of colour.
     box.TitleLabel = library:Label(box.TitleRow, "", {
-        Color = Theme.TextActive, Size = 14, Weight = "Bold",
-        Size2 = UDim2.new(1, 0, 1, 0),
+        Color = Theme.TextActive, Size = 13, Weight = "Bold",
+        Size2 = UDim2.new(1, 0, 1, -S(6)),
+    })
+
+    -- And a rule under it, edge to edge.
+    --
+    -- This is what was missing. The reference divides a card's heading from its
+    -- contents with a hairline across the FULL width - not inset to the text
+    -- like the row padding, but running to both walls of the card. The card
+    -- pads its children by 12 a side, so the rule is widened by that much and
+    -- pulled back by half of it to undo the inset.
+    Util.New("Frame", {
+        Name = "TitleRule", BackgroundColor3 = Theme.Dark27, BorderSizePixel = 0,
+        AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.new(0, -S(12), 1, 0),
+        Size = UDim2.new(1, S(24), 0, 1),
+        Parent = box.TitleRow,
     })
 
     function box:SetTitle(text)
@@ -1983,21 +1997,39 @@ function Groupbox:AddDropdown(index, options)
     -----------------------------------------------------------------
     -- Popup
     -----------------------------------------------------------------
+    -- Dark22 on the field's Dark33, so the open list reads as a well sunk into
+    -- the menu rather than a lighter card floating over it - which is how the
+    -- reference shows it, and what lets a highlighted row be the brightest
+    -- thing in the list.
     local popup = Util.New("Frame", {
-        Name = "Popup", BackgroundColor3 = Theme.Dark33, BorderSizePixel = 0,
+        Name = "Popup", BackgroundColor3 = Theme.Dark22, BorderSizePixel = 0,
         Visible = false, ClipsDescendants = true, ZIndex = 50,
         Parent = library.PopupLayer,
     })
     Util.Corner(popup, S(M.CtrlRounding))
     Util.Stroke(popup, Theme.Dark42)
 
+    -- Tight. The options in the reference are stacked with no air between them
+    -- and only a few pixels of inset at the walls - the list is a block of
+    -- choices, not a spaced-out menu - so the gap between rows is zero and the
+    -- highlight band on one runs straight into its neighbour.
+    local LIST_PAD = 4
+
     local list = Util.New("Frame", {
         BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(S(M.ComboPad), S(M.ComboPad)),
-        Size = UDim2.new(1, -S(M.ComboPad * 2), 1, -S(M.ComboPad * 2)),
+        Position = UDim2.fromOffset(S(LIST_PAD), S(LIST_PAD)),
+        Size = UDim2.new(1, -S(LIST_PAD * 2), 1, -S(LIST_PAD * 2)),
         ZIndex = 51, Parent = popup,
     })
-    Util.List(list, S(M.ComboPad))
+    Util.List(list, 0)
+
+    function dropdown:_Height()
+        -- Rows butt up against each other, so the height is just the rows plus
+        -- the wall inset. It was computing a gap per row that no longer exists,
+        -- which left a growing band of dead space at the bottom of long lists.
+        local count = math.max(#self.Values, 1)
+        return count * S(M.SelectableH) + S(LIST_PAD * 2)
+    end
 
     function dropdown:_PreviewText()
         if self.Multi then
@@ -2015,14 +2047,17 @@ function Groupbox:AddDropdown(index, options)
         self._rows = {}
 
         for order, value in ipairs(self.Values) do
-            -- The selected option carries a fill, not just coloured text. In
-            -- the reference the current choice is a lighter band across the
-            -- full width of the list, which is what lets you find it in a long
-            -- list without reading any of it. Hover gets a weaker version of
-            -- the same band, so the two read as the same mechanism.
+            -- Options read near-white, not grey.
+            --
+            -- These were TextInactive, the same dim tone as a row label, which
+            -- is wrong for a list: a row label sits beside the thing it names
+            -- and can afford to recede, but every line of an open list is a
+            -- choice and they all have to be readable at once. In the reference
+            -- the unpicked options are as bright as body text and only the
+            -- picked one changes colour.
             local entry = Util.New("TextButton", {
                 Name = "Option", Text = "", AutoButtonColor = false,
-                BackgroundColor3 = Theme.Dark33,
+                BackgroundColor3 = Theme.Dark37,
                 BackgroundTransparency = 1, BorderSizePixel = 0,
                 Size = UDim2.new(1, 0, 0, S(M.SelectableH)),
                 LayoutOrder = order, ZIndex = 52, Parent = list,
@@ -2030,14 +2065,14 @@ function Groupbox:AddDropdown(index, options)
             Util.Corner(entry, S(M.CtrlRounding))
 
             local text = library:Label(entry, tostring(value), {
-                Color = Theme.TextInactive, Size = 12,
+                Color = Theme.TextActive, Size = 12,
                 Position = UDim2.fromOffset(S(8), 0),
                 Size2 = UDim2.new(1, -S(12), 1, 0), ZIndex = 53,
             })
 
             local record = {
                 Frame = entry, Label = text, Value = value,
-                Anim = Anim.track(text, "TextColor3", Theme.TextInactive),
+                Anim = Anim.track(text, "TextColor3", Theme.TextActive),
                 Fill = Anim.track(entry, "BackgroundTransparency", 1),
             }
             self._rows[#self._rows + 1] = record
@@ -2070,10 +2105,12 @@ function Groupbox:AddDropdown(index, options)
             local selected = self.Multi
                 and (self.Value[record.Value] and true or false)
                 or (self.Value == record.Value)
-            Anim.set(record.Anim, selected and Theme.Accent
-                or (record.Hover and Theme.TextHovered or Theme.TextInactive))
-            Anim.set(record.Fill, selected and 0.25
-                or (record.Hover and 0.6 or 1))
+            -- Picked: accent text on a clear band. Hovered: the same band,
+            -- weaker, with the text left alone - so hover says "this is under
+            -- the cursor" and only the colour says "this is the one set".
+            Anim.set(record.Anim, selected and Theme.Accent or Theme.TextActive)
+            Anim.set(record.Fill, selected and 0.15
+                or (record.Hover and 0.45 or 1))
         end
 
         Anim.set(self._TextAnim, self.IsOpen and Theme.TextActive
@@ -2141,9 +2178,7 @@ function Groupbox:AddDropdown(index, options)
     end
 
     function dropdown:_Position()
-        local count = math.max(#self.Values, 1)
-        local height = count * S(M.SelectableH) + (count - 1) * S(M.ComboPad)
-            + S(M.ComboPad * 2)
+        local height = self:_Height()
         local origin = box.AbsolutePosition
         -- Flush under the field, not floating off it: 2px, so the list reads as
         -- the field opening rather than a separate panel appearing nearby.
@@ -2155,7 +2190,7 @@ function Groupbox:AddDropdown(index, options)
         end
 
         popup.Position = UDim2.fromOffset(origin.X, below)
-        self._Height = height
+        self._HeightValue = height
         popup.Size = UDim2.fromOffset(box.AbsoluteSize.X, self._Anim and self._Anim.Value or height)
     end
 
@@ -2171,7 +2206,7 @@ function Groupbox:AddDropdown(index, options)
         self.IsOpen = true
         self:_Position()
         popup.Visible = true
-        self._Anim.Target = self._Height
+        self._Anim.Target = self._HeightValue
         self:_Repaint()
     end
 
@@ -3010,15 +3045,26 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
     options = options or {}
     local library = groupbox.Library
 
+    -- A rounded square the size of a checkbox, not a circle.
+    --
+    -- Every other control on a row is a rounded rectangle at CtrlRounding, and
+    -- a 12px disc beside them was the one shape in the menu that did not belong
+    -- to the set. Matching the toggle's size as well means a card whose rows
+    -- carry a mix of toggles and swatches has one clean column of controls down
+    -- the right rather than two slightly different ones.
     local swatch = Util.New("TextButton", {
         Name = "ColorPicker", Text = "", AutoButtonColor = false,
         BackgroundColor3 = options.Default or Theme.White, BorderSizePixel = 0,
         AnchorPoint = Vector2.new(1, 0.5),
         Position = UDim2.new(1, -(offset or 0), 0.5, 0),
-        Size = UDim2.fromOffset(S(M.ColorBtnR * 2), S(M.ColorBtnR * 2)),
+        Size = UDim2.fromOffset(S(M.CheckboxBox), S(M.CheckboxBox)),
         ZIndex = 6, Parent = parentRow,
     })
-    Util.Corner(swatch, S(M.ColorBtnR))
+    Util.Corner(swatch, S(M.CtrlRounding))
+
+    -- The outline matters more here than on a toggle: a swatch set to something
+    -- near the card colour would otherwise have no edge at all.
+    Util.Stroke(swatch, Theme.Dark42)
 
     local picker = {
         Type = "ColorPicker", Index = index, Text = options.Text or index,
@@ -3035,13 +3081,30 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
     local popH = S(picker.HasAlpha and M.CpWindow.Y or M.CpWindowNoA.Y)
     local pad  = S(M.CpPad)
 
+    -- Dark22, the same sunk surface the dropdown list uses, so both popups read
+    -- as the menu opening rather than a lighter card arriving on top of it.
     local popup = Util.New("Frame", {
-        Name = "ColorPopup", BackgroundColor3 = Theme.Dark33, BorderSizePixel = 0,
+        Name = "ColorPopup", BackgroundColor3 = Theme.Dark22, BorderSizePixel = 0,
         Size = UDim2.fromOffset(popW, popH), Visible = false, ZIndex = 60,
         Parent = library.PopupLayer,
     })
     Util.Corner(popup, S(M.CardRounding))
     Util.Stroke(popup, Theme.Dark42)
+
+    -- The shadow is a SIBLING, not a child.
+    --
+    -- Util.Shadow draws outside the bounds of whatever it is given, and with
+    -- Roblox's sibling Z ordering a child always renders in front of its
+    -- parent - so shadow layers parented to the popup would sit on top of its
+    -- own fill however negative their ZIndex. The hotkey panel solves this with
+    -- an outer box; here a separate host tracked to the popup's rect in Open()
+    -- is less surgery for the same result.
+    local shadowHost = Util.New("Frame", {
+        Name = "ColorPopupShadow", BackgroundTransparency = 1,
+        Size = UDim2.fromOffset(popW, popH), Visible = false, ZIndex = 59,
+        Parent = library.PopupLayer,
+    })
+    Util.Shadow(shadowHost, S(M.CardRounding), 4, S(2))
 
     local sv = Util.New("Frame", {
         BackgroundColor3 = Theme.White, BorderSizePixel = 0,
@@ -3133,15 +3196,19 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
         Util.Corner(alphaGrab, S(M.CtrlRounding))
     end
 
+    -- Dark33 on the popup's Dark22. Fields in this menu are LIGHTER than what
+    -- they sit on - the dropdown field is Dark33 on a Dark18 card - and the hex
+    -- box was Dark22, the same tone as the popup it sits in, so it had no edge
+    -- of its own beyond the stroke.
     local hexBox = Util.New("TextBox", {
-        BackgroundColor3 = Theme.Dark22, BorderSizePixel = 0,
+        BackgroundColor3 = Theme.Dark33, BorderSizePixel = 0,
         ClearTextOnFocus = false, Text = "",
         TextSize = S(12), TextColor3 = Theme.TextActive,
         TextXAlignment = Enum.TextXAlignment.Center,
         AnchorPoint = Vector2.new(0, 1),
         Position = UDim2.new(0, pad, 1, -pad),
         Size = UDim2.new(1, -pad * 2, 0, S(18)),
-        ZIndex = 62, Weight = "Medium", Parent = popup,
+        ZIndex = 62, Weight = "Bold", Parent = popup,
     })
     Util.Corner(hexBox, S(M.CtrlRounding))
     Util.Stroke(hexBox, Theme.Dark42)
@@ -3197,7 +3264,7 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
 
     function picker:SetVisible(visible) swatch.Visible = visible and true or false end
     function picker:SetRowOffset(value) swatch.Position = UDim2.new(1, -value, 0.5, 0) end
-    function picker:Width() return S(M.ColorBtnR * 2) end
+    function picker:Width() return S(M.CheckboxBox) end
 
     function picker:Open()
         library:CloseAllPopups(self)
@@ -3206,9 +3273,14 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
         local viewport = library.ScreenGui.AbsoluteSize
         local x = Util.Clamp(origin.X + swatch.AbsoluteSize.X - popW, 8,
                              math.max(viewport.X - popW - 8, 8))
-        local y = origin.Y + swatch.AbsoluteSize.Y + S(M.ComboPad)
-        if y + popH > viewport.Y then y = math.max(origin.Y - popH - S(M.ComboPad), 8) end
+        -- 2px below the swatch, the same gap the dropdown list uses, so both
+        -- open the same distance from what opened them.
+        local y = origin.Y + swatch.AbsoluteSize.Y + S(2)
+        if y + popH > viewport.Y then y = math.max(origin.Y - popH - S(2), 8) end
+
         popup.Position = UDim2.fromOffset(x, y)
+        shadowHost.Position = popup.Position
+        shadowHost.Visible = true
         popup.Visible = true
         self:_Repaint()
     end
@@ -3217,6 +3289,7 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
         if not self.IsOpen then return end
         self.IsOpen = false
         popup.Visible = false
+        shadowHost.Visible = false
     end
 
     function picker:HitTest(point)
@@ -3305,7 +3378,7 @@ local function RelayoutAddons(toggle)
 
     for _, swatch in ipairs(swatches) do
         swatch:SetRowOffset(offset)
-        offset = offset + S(M.ColorBtnR * 2) + S(M.CheckboxPadX)
+        offset = offset + S(M.CheckboxBox) + S(M.CheckboxPadX)
     end
 
     if toggle.KeyPicker then
