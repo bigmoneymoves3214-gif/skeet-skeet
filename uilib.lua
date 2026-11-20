@@ -108,10 +108,13 @@ local M = {
     -- The reference scales it down as the thing gets smaller, so this does too.
     --
     -- Rounding is the window, CardRounding the cards, CtrlRounding anything you
-    -- click - toggles, slider tracks, dropdown fields and their popups.
+    -- click - toggles, slider tracks, dropdown fields and their popups. The
+    -- control radius is deliberately almost square: in the reference a combo
+    -- box and its open list have the corners barely taken off, which is what
+    -- keeps a stack of options reading as one block.
     Rounding     = 6,
     CardRounding = 4,
-    CtrlRounding = 3,
+    CtrlRounding = 2,
     AnimSpeed = 14,
 
     WindowW   = 650,
@@ -795,6 +798,26 @@ end
 ---------------------------------------------------------------------------------
 -- POPUPS
 ---------------------------------------------------------------------------------
+-- Absolute screen coordinates into PopupLayer's own local space.
+--
+-- This is why every popup landed low. They are positioned from the control's
+-- AbsolutePosition, but Position is set in the PARENT's local space, and those
+-- two are not the same here: the layer sits in a ScreenGui with IgnoreGuiInset
+-- on, so its local origin is the true top-left of the screen while
+-- AbsolutePosition is reported from below the topbar. Feeding one into the
+-- other dropped every popup by the height of that inset - about 36px - so a
+-- dropdown opened a card's width below its own field instead of against it.
+--
+-- Subtracting the layer's own AbsolutePosition cancels it without anyone
+-- having to know what the inset is, or which way round to apply it: both
+-- values are in the same space, so their difference is the local offset.
+function Library:ToLayer(x, y)
+    local layer = self.PopupLayer
+    if not layer then return x, y end
+    local origin = layer.AbsolutePosition
+    return x - origin.X, y - origin.Y
+end
+
 function Library:RegisterPopup(popup)
     self._popups[#self._popups + 1] = popup
     return popup
@@ -1058,7 +1081,7 @@ function Library:CreateWindow(config)
     -- The circle is drawn either way and fills in when the image arrives.
     -----------------------------------------------------------------
     local brandPadX = S(16)
-    local avatarD   = S(26)
+    local avatarD   = S(32)
 
     local avatar = Util.New("ImageLabel", {
         Name = "Avatar", BackgroundColor3 = Theme.Dark27, BorderSizePixel = 0,
@@ -1084,13 +1107,26 @@ function Library:CreateWindow(config)
         end)
     end)
 
-    window.BrandLabel = self:Label(titlebar, window.Title, {
+    -- Beside the avatar: how long is left on your key.
+    --
+    -- This corner used to carry the script's name, which is the one thing you
+    -- already know - you opened it. Time remaining is the thing you would
+    -- otherwise have to leave the game to find out.
+    --
+    -- The value is a placeholder until something real feeds it. SetBrandText
+    -- is the hook: call it with whatever the key server returns and the label
+    -- updates in place, no rebuild.
+    window.BrandLabel = self:Label(titlebar, config.BrandText or "-- --", {
         Color = Theme.TextActive, Size = 15, Weight = "Bold", Truncate = false,
         AnchorPoint = Vector2.new(0, 0.5),
         Position = UDim2.new(0, brandPadX + avatarD + S(10), 0.5, 0),
         Size2 = UDim2.fromOffset(0, S(18)),
         AutoSize = Enum.AutomaticSize.X, ZIndex = 3,
     })
+
+    function window:SetBrandText(text)
+        self.BrandLabel.Text = tostring(text or "")
+    end
 
     -- Right-aligned. The branding owns the left of the bar, so the tabs run to
     -- the right edge and grow leftward as they are added - which also means the
@@ -1101,7 +1137,7 @@ function Library:CreateWindow(config)
         Position = UDim2.new(1, -S(20), 0, 0),
         -- Starts after the branding so auto-fit measures the space it really
         -- has, not the whole bar.
-        Size = UDim2.new(1, -S(16 + 26 + 10 + 140), 1, 0),
+        Size = UDim2.new(1, -S(16 + 32 + 10 + 140), 1, 0),
         ZIndex = 2, Parent = titlebar,
     })
     window.TabLayout = Util.List(
@@ -1358,17 +1394,18 @@ function Window:AddTab(name, _icon)
         return math.max((inner - S(M.ContentSpacing)) / 2, S(80))
     end
 
-    local function column(order)
+    -- Takes a parent, so a subtab can make its pair inside its own surface
+    -- rather than directly in the scroll.
+    local function column(order, parent)
         local frame = Util.New("Frame", {
             Name = "Column" .. order, BackgroundTransparency = 1,
             Size = UDim2.fromOffset(columnWidth(false), 0),
             AutomaticSize = Enum.AutomaticSize.Y,
-            LayoutOrder = order, Parent = tab.Page,
+            LayoutOrder = order, Parent = parent or tab.Page,
         })
         Util.List(frame, S(M.ContentSpacing))
         return frame
     end
-
     tab.Left  = column(1)
     tab.Right = column(2)
 
@@ -1492,42 +1529,55 @@ function Tab:_NewCard(column)
     box.Frame = frame
 
     -- Every card carries a heading. The old builder took a name and used it
-    -- only to rename the Instance, so the title each card has in the reference
-    -- was never drawn at all - which is most of why the two did not match below
-    -- the titlebar. Built here and filled in by SetTitle.
+    -- A filled header BAND, not a line of text with a rule under it.
+    --
+    -- This is what the sketch shows: a lighter strip running the full width of
+    -- the card with the title sitting in it, and the card body dark below. The
+    -- previous attempt drew the title on the card's own fill and divided it
+    -- with a hairline, which is a different thing - the heading has its own
+    -- surface here, and that surface is what you see first.
+    --
+    -- It is pulled out to both walls because the card pads its children by 12 a
+    -- side, and extended up by the card's top padding so it meets the card's
+    -- own edge with nothing showing above it.
     box.TitleRow = Util.New("Frame", {
-        Name = "Title", BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, S(26)),
+        Name = "Title", BackgroundColor3 = Theme.Dark33, BorderSizePixel = 0,
+        Position = UDim2.new(0, -S(12), 0, -S(10)),
+        Size = UDim2.new(1, S(24), 0, S(28)),
         Visible = false, LayoutOrder = 0, Parent = frame,
     })
+    Util.Corner(box.TitleRow, S(M.CardRounding))
 
-    -- Same size as the rows below it, white rather than grey. In the reference
-    -- the heading is not a bigger word, it is a brighter one - "Kill Effects"
-    -- over "Kill Effects" reads as a title purely because of colour.
-    box.TitleLabel = library:Label(box.TitleRow, "", {
-        Color = Theme.TextActive, Size = 13, Weight = "Bold",
-        Size2 = UDim2.new(1, 0, 1, -S(6)),
+    -- UICorner rounds all four, and only the top two should be: the band meets
+    -- the card body below it on a straight edge. A patch the height of the
+    -- radius squares the bottom off again.
+    Util.New("Frame", {
+        Name = "TitleFoot", BackgroundColor3 = Theme.Dark33, BorderSizePixel = 0,
+        AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.new(0, 0, 1, 0),
+        Size = UDim2.new(1, 0, 0, S(M.CardRounding)),
+        Parent = box.TitleRow,
     })
 
-    -- And a rule under it, edge to edge.
-    --
-    -- This is what was missing. The reference divides a card's heading from its
-    -- contents with a hairline across the FULL width - not inset to the text
-    -- like the row padding, but running to both walls of the card. The card
-    -- pads its children by 12 a side, so the rule is widened by that much and
-    -- pulled back by half of it to undo the inset.
-    Util.New("Frame", {
-        Name = "TitleRule", BackgroundColor3 = Theme.Dark27, BorderSizePixel = 0,
-        AnchorPoint = Vector2.new(0, 1),
-        Position = UDim2.new(0, -S(12), 1, 0),
-        Size = UDim2.new(1, S(24), 0, 1),
-        Parent = box.TitleRow,
+    box.TitleLabel = library:Label(box.TitleRow, "", {
+        Color = Theme.TextActive, Size = 13, Weight = "Bold",
+        Position = UDim2.fromOffset(S(12), 0),
+        Size2 = UDim2.new(1, -S(24), 1, 0), ZIndex = 2,
+    })
+
+    -- A spacer in the layout the band's real height, since the band itself is
+    -- pulled out of position and cannot reserve its own room.
+    box.TitleSpacer = Util.New("Frame", {
+        Name = "TitleSpace", BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, S(22)),
+        Visible = false, LayoutOrder = 0, Parent = frame,
     })
 
     function box:SetTitle(text)
         text = text and tostring(text) or ""
         self.TitleLabel.Text = text
         self.TitleRow.Visible = text ~= ""
+        self.TitleSpacer.Visible = text ~= ""
     end
 
     self.Cards[#self.Cards + 1] = box
@@ -2189,7 +2239,7 @@ function Groupbox:AddDropdown(index, options)
             below = origin.Y - height - S(2)
         end
 
-        popup.Position = UDim2.fromOffset(origin.X, below)
+        popup.Position = UDim2.fromOffset(library:ToLayer(origin.X, below))
         self._HeightValue = height
         popup.Size = UDim2.fromOffset(box.AbsoluteSize.X, self._Anim and self._Anim.Value or height)
     end
@@ -2541,11 +2591,26 @@ end
 -- circle and rotated to match, because Roblox rotates a frame about its own
 -- centre rather than about a parent origin.
 ---------------------------------------------------------------------------------
-local function cog(parent, color)
+-- The gear.
+--
+-- A real icon, with the drawn one kept as a fallback.
+--
+-- Six rotated rectangles around a ring is a recognisable cog at 20px and a
+-- smudge at 12, which is the size it actually renders at here. Roblox ships an
+-- icon set as ordinary image assets, so the first choice is one of those.
+--
+-- The catch is that an asset id either resolves on a given client or silently
+-- renders nothing, and a settings button that is invisible is worse than one
+-- drawn out of frames. So the image is tried, and if it has not loaded shortly
+-- after it is asked for, the drawn cog is switched on in its place. Both exist
+-- from the start and only visibility changes, which means no rebuilding and no
+-- flicker in the common case where the image is already cached.
+local COG_IMAGE = "rbxassetid://10734950309"
+
+local function cogDrawn(parent, color)
     local holder = Util.New("Frame", {
-        Name = "Cog", BackgroundTransparency = 1,
-        Size = UDim2.fromOffset(S(M.HotkeyW), S(M.HotkeyH)),
-        ZIndex = 6, Parent = parent,
+        Name = "CogDrawn", BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1), ZIndex = 6, Parent = parent,
     })
 
     local parts = {}
@@ -2559,7 +2624,7 @@ local function cog(parent, color)
             Size = UDim2.fromOffset(S(4), S(2.5)),
             Rotation = index * 60, Parent = holder,
         })
-        parts[#parts + 1] = tooth
+        parts[#parts + 1] = { Inst = tooth, Prop = "BackgroundColor3" }
     end
 
     local ring = Util.New("Frame", {
@@ -2568,7 +2633,7 @@ local function cog(parent, color)
         Size = UDim2.fromOffset(S(8), S(8)), ZIndex = 7, Parent = holder,
     })
     Util.Corner(ring, S(4))
-    parts[#parts + 1] = ring
+    parts[#parts + 1] = { Inst = ring, Prop = "BackgroundColor3" }
 
     -- The hole has to match whatever is behind the cog, so it is filled with
     -- the card colour rather than being transparent.
@@ -2579,6 +2644,45 @@ local function cog(parent, color)
     })
     Util.Corner(hole, S(2))
 
+    return holder, parts
+end
+
+-- Returns the holder and the list of things to tint, exactly as the drawn
+-- version did, so CreateKeyPicker below needs no changes: the image is just
+-- another entry in that list and Anim.track drives ImageColor3 the same way it
+-- drives BackgroundColor3.
+local function cog(parent, color)
+    local holder = Util.New("Frame", {
+        Name = "Cog", BackgroundTransparency = 1,
+        Size = UDim2.fromOffset(S(M.HotkeyW), S(M.HotkeyH)),
+        ZIndex = 6, Parent = parent,
+    })
+
+    local icon = Util.New("ImageLabel", {
+        Name = "CogIcon", BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        Image = COG_IMAGE, ImageColor3 = color,
+        ZIndex = 6, Parent = holder,
+    })
+
+    local drawn, parts = cogDrawn(holder, color)
+    drawn.Visible = false
+
+    -- Give the asset a moment, then settle on whichever one works. IsLoaded is
+    -- the only honest test: a bad id neither errors nor draws.
+    task.spawn(function()
+        for _ = 1, 20 do
+            if not holder.Parent then return end
+            if icon.IsLoaded then return end
+            task.wait(0.1)
+        end
+        if holder.Parent and not icon.IsLoaded then
+            icon.Visible = false
+            drawn.Visible = true
+        end
+    end)
+
+    parts[#parts + 1] = { Inst = icon, Prop = "ImageColor3" }
     return holder, parts
 end
 
@@ -2595,10 +2699,14 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
         ZIndex = 6, Parent = parentRow,
     })
 
+    -- cog returns {Inst, Prop} pairs rather than bare frames, because the icon
+    -- tints through ImageColor3 and the drawn fallback through
+    -- BackgroundColor3. Tracking the property each part actually uses is what
+    -- lets both answer to one colour.
     local _, teeth = cog(button, Theme.TextInactive)
     local anims = {}
     for i, part in ipairs(teeth) do
-        anims[i] = Anim.track(part, "BackgroundColor3", Theme.TextInactive)
+        anims[i] = Anim.track(part.Inst, part.Prop, Theme.TextInactive)
     end
 
     local picker = {
@@ -2983,7 +3091,7 @@ local function CreateKeyPicker(groupbox, parentRow, index, options, parentToggle
                              math.max(viewport.X - HK_W - 8, 8))
         local y = origin.Y + S(M.HotkeyH) + S(6)
         if y + HK_H > viewport.Y then y = math.max(origin.Y - HK_H - S(6), 8) end
-        panelX, panelY = x - HK_SH, y - HK_SH
+        panelX, panelY = library:ToLayer(x - HK_SH, y - HK_SH)
 
         self:_RefreshPanel()
 
@@ -3278,7 +3386,7 @@ local function CreateColorPicker(groupbox, parentRow, index, options, offset)
         local y = origin.Y + swatch.AbsoluteSize.Y + S(2)
         if y + popH > viewport.Y then y = math.max(origin.Y - popH - S(2), 8) end
 
-        popup.Position = UDim2.fromOffset(x, y)
+        popup.Position = UDim2.fromOffset(library:ToLayer(x, y))
         shadowHost.Position = popup.Position
         shadowHost.Visible = true
         popup.Visible = true
@@ -3540,14 +3648,33 @@ function Tab:AddSubTab(name)
     })
     sub.GlowAnim = Anim.track(sub.Glow, "BackgroundTransparency", 1)
 
-    -- Another pair of columns in the tab's own scroll. Ordered after every pair
-    -- already there so the layout keeps them together.
-    local base = #self._Columns
-    sub.Left  = self._Column(base + 1)
-    sub.Right = self._Column(base + 2)
-    sub.Left.Visible, sub.Right.Visible = false, false
+    -- A subtab's pair of columns lives inside a surface of its own.
+    --
+    -- They used to be two bare frames dropped straight into the tab's scroll,
+    -- which works for layout but leaves nothing to fade: a plain Frame has no
+    -- GroupTransparency, so the pair could only ever be shown or hidden. One
+    -- CanvasGroup holding both gives the swap the same entry a tab change has,
+    -- and keeps the two columns moving together - fading or lifting one without
+    -- the other would tear the page in half down the middle.
+    sub.Wrap = library:Surface({
+        Name = "SubPage" .. index, BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        Visible = false, LayoutOrder = index, Parent = self.Page,
+    })
+    Util.List(sub.Wrap, S(M.ContentSpacing), Enum.FillDirection.Horizontal)
+
+    sub.Left  = self._Column(1, sub.Wrap)
+    sub.Right = self._Column(2, sub.Wrap)
     self._Columns[#self._Columns + 1] = sub.Left
     self._Columns[#self._Columns + 1] = sub.Right
+
+    sub.Fade = Scalar.track(1, function(value)
+        sub.Wrap.Position = UDim2.fromOffset(0, math.floor((1 - value) * S(10)))
+        if library.CanFade then
+            sub.Wrap.GroupTransparency = 1 - value
+        end
+    end, M.AnimSpeed * 1.3)
 
     local hovered = false
     library:Watch(function(point)
@@ -3587,12 +3714,21 @@ function Tab:SetActiveSubTab(sub)
     local previous = self.ActiveSubTab
     self.ActiveSubTab = sub
 
+    -- The outgoing page is cut, the incoming one lifts and fades up - the same
+    -- entry a tab change has, and the same reason only one side animates:
+    -- cross-fading would show both subtabs' cards stacked on top of each other
+    -- for the length of the fade.
     if previous then
-        previous.Left.Visible, previous.Right.Visible = false, false
+        previous.Wrap.Visible = false
         previous:_Repaint()
     end
 
-    sub.Left.Visible, sub.Right.Visible = true, true
+    sub.Wrap.Visible = true
+    sub.Fade.Value = 0
+    sub.Fade.Target = 1
+    if sub.Library.CanFade then
+        pcall(function() sub.Wrap.GroupTransparency = 1 end)
+    end
     sub:_Repaint()
 
     -- Back to the top: the new pair's content has nothing to do with how far
